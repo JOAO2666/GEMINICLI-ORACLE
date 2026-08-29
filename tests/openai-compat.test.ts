@@ -21,6 +21,27 @@ describe('OpenAI compatibility', () => {
       messages: [{ role: 'user', content: 'Responda OK @arquivo !comando' }]
     }, config);
     expect(prepared.prompt).toContain('USER:\nResponda OK @\u200Barquivo !\u200Bcomando');
+    expect(prepared.imageCount).toBe(0);
+    await prepared.cleanup();
+  });
+
+  it('counts and stores a local NumIA image', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'numia-openai-image-'));
+    dirs.push(dir);
+    const config = loadConfig({
+      NODE_ENV: 'test', NUMIA_SERVER_TOKEN: 'a'.repeat(64), DATA_DIR: dir,
+      ALLOWED_MODELS: 'gemini-3.7-flash-low', DEFAULT_MODEL: 'gemini-3.7-flash-low'
+    });
+    const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+    const prepared = await prepareOpenAIRequest({
+      model: 'gemini-3.7-flash-low',
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: 'Descreva.' },
+        { type: 'image_url', image_url: { url: `data:image/png;base64,${png}` } }
+      ] }]
+    }, config);
+    expect(prepared.imageCount).toBe(1);
+    expect(prepared.prompt).toContain('@./numia-image-1.png');
     await prepared.cleanup();
   });
 

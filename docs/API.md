@@ -19,6 +19,9 @@ O servidor também aceita o formato OpenAI usado pelo aplicativo
 
 As variantes `/v1/models` e `/v1/chat/completions` também são aceitas. Texto e imagens
 locais em Data URL são suportados. URLs remotas de imagem são recusadas por segurança.
+Requisições do NumIA que contenham imagens são encaminhadas automaticamente ao modelo
+definido em `VISION_MODEL` (por padrão, `gemini-3.7-flash-low`), mesmo quando o botão de
+raciocínio estiver selecionado.
 
 ## Saúde e disponibilidade
 

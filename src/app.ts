@@ -83,7 +83,11 @@ export async function buildApp(config: Config): Promise<FastifyInstance> {
 
   async function compatibleChat(body: unknown, request: FastifyRequest, reply: FastifyReply) {
     const prepared = await prepareOpenAIRequest(body, config);
-    const model = chats.validateModel(prepared.input.model);
+    const requestedModel = chats.validateModel(prepared.input.model);
+    // Antigravity currently exposes vision reliably only through the low Flash profile.
+    // NumIA may send the selected chat/thinking model with an image, so route image turns
+    // through the configured vision model while leaving text turns untouched.
+    const model = prepared.imageCount > 0 ? config.visionModel : requestedModel;
     const id = `chatcmpl-${prepared.conversationId}`;
     const created = Math.floor(Date.now() / 1000);
 

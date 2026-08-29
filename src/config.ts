@@ -12,6 +12,7 @@ const envSchema = z.object({
   ALLOWED_ORIGINS: z.string().default(''),
   ALLOWED_MODELS: z.string().default('gemini-3.1-pro-high,gemini-3.1-pro-low'),
   DEFAULT_MODEL: z.string().default('gemini-3.1-pro-high'),
+  VISION_MODEL: z.string().default(''),
   MAX_GEMINI_PROCESSES: positiveInt(2),
   AGY_TIMEOUT_MS: positiveInt(300_000),
   AGY_COMMAND: z.string().default('agy'),
@@ -34,9 +35,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (!allowedModels.includes(parsed.DEFAULT_MODEL)) {
     throw new Error('DEFAULT_MODEL precisa estar em ALLOWED_MODELS');
   }
+  const visionModel = parsed.VISION_MODEL || (allowedModels.includes('gemini-3.7-flash-low')
+    ? 'gemini-3.7-flash-low'
+    : parsed.DEFAULT_MODEL);
+  if (!allowedModels.includes(visionModel)) {
+    throw new Error('VISION_MODEL precisa estar em ALLOWED_MODELS');
+  }
   return {
     ...parsed,
     allowedModels,
+    visionModel,
     allowedOrigins: parsed.ALLOWED_ORIGINS.split(',').map((v) => v.trim()).filter(Boolean),
     dataDir: path.resolve(parsed.DATA_DIR)
   };

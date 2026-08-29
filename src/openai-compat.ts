@@ -126,6 +126,7 @@ export async function prepareOpenAIRequest(body: unknown, config: Config) {
       prompt,
       workingDirectory,
       conversationId: crypto.randomUUID(),
+      imageCount: imageCounter.value,
       cleanup: () => fs.rm(workingDirectory, { recursive: true, force: true })
     };
   } catch (error) {
