@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+data/
+.gemini-server-home/
+coverage/
+*.log
+*.tgz
+.tools/
+.oracle/

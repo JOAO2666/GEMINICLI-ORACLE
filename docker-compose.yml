@@ -1,0 +1,53 @@
+services:
+  server:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATA_DIR: /data
+    volumes:
+      - antigravity-auth:/home/node/.gemini
+      - numia-data:/data
+    expose:
+      - "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health',{headers:{'x-forwarded-proto':'https'}}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      DOMAIN: ${DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+  antigravity-login:
+    profiles: ["login"]
+    build:
+      context: .
+    stdin_open: true
+    tty: true
+    environment:
+      SSH_CONNECTION: "manual-oauth"
+    volumes:
+      - antigravity-auth:/home/node/.gemini
+    command: ["agy"]
+
+volumes:
+  antigravity-auth:
+  numia-data:
+  caddy-data:
+  caddy-config:
