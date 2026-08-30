@@ -15,10 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certifi
     && mkdir -p /app /data /workspaces /home/node/.gemini \
     && chown -R node:node /app /data /workspaces /home/node/.gemini
 WORKDIR /app
+USER node
+RUN curl -fsSL https://antigravity.google/cli/install.sh | bash
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
 COPY --chown=node:node package.json ./
-USER node
-RUN curl -fsSL https://antigravity.google/cli/install.sh | bash
 EXPOSE 3000
 CMD ["node", "dist/server.js"]

@@ -88,7 +88,10 @@ export class McpWorkspaceService {
     const root = path.join(this.root, id);
     const createdAt = new Date().toISOString();
     const metadata = { id, name: cleanName(name, 'Novo workspace'), createdAt };
-    await fs.mkdir(root, { recursive: false, mode: 0o700 });
+    // The worker supervisor starts as a credential-less root process and drops to
+    // UID 1000 for commands. It needs traverse-only access before dropping UID;
+    // files themselves remain private (0600) and the volume is not public.
+    await fs.mkdir(root, { recursive: false, mode: 0o755 });
     await fs.writeFile(path.join(root, '.workspace.json'), JSON.stringify(metadata, null, 2), { mode: 0o600, flag: 'wx' });
     return metadata;
   }
