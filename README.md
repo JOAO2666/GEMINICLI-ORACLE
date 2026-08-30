@@ -36,6 +36,12 @@ Alternativas:
 
 ## Instalação na VM
 
+### Opção automática para Windows
+
+Baixe ou clone o repositório em um computador Windows e execute `INSTALAR_AUTOMATICO.bat`. O assistente configura uma VM Linux já criada, gera chaves privadas, instala/inicia o Docker e conduz o login oficial do Google. Ele não cria recursos na Oracle e não modifica faturamento; a VM deve ter sido criada manualmente como Always Free.
+
+### Opção manual
+
 ```bash
 git clone https://github.com/JOAO2666/GEMINICLI-ORACLE.git numia-gemini-server
 cd numia-gemini-server

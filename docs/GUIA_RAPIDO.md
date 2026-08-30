@@ -12,7 +12,20 @@ Este projeto transforma o modo headless do Antigravity CLI (`agy`) em uma API pr
 - HTTPS automático com Caddy;
 - autenticação Google persistente em um volume separado.
 
-## Instalação resumida na Oracle
+## Instalação automática pelo Windows
+
+O método manual abaixo continua disponível. Para uma instalação assistida:
+
+1. Crie primeiro uma VM Linux marcada como Always Free na Oracle e libere as portas 22, 80 e 443.
+2. No Windows, baixe o repositório completo ou execute `git clone https://github.com/JOAO2666/GEMINICLI-ORACLE.git`.
+3. Dê duplo clique em `INSTALAR_AUTOMATICO.bat`.
+4. Informe IP da VM, usuário SSH, arquivo da chave privada e domínio. Para um IP como `129.148.23.167`, pode usar `129-148-23-167.nip.io`.
+5. Confirme o login Google quando o assistente abrir o fluxo oficial do `agy`.
+6. No final, guarde a chave NumIA exibida em um gerenciador de senhas.
+
+O instalador pode ser executado novamente para atualizar o projeto. Ele preserva `.env`, chaves, autenticação e volumes existentes. Ele não cria a VM, não acessa a área de faturamento e não transforma a conta Oracle em Pay As You Go.
+
+## Instalação manual resumida na Oracle
 
 Use uma VM Ampere A1 que apareça como Always Free, abra somente as portas 22, 80 e 443 e instale Docker com o plugin Compose. Depois:
 
