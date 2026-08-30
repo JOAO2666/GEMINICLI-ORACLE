@@ -48,7 +48,7 @@ function safeChildOptions(cwd: string): SpawnOptionsWithoutStdio {
     gid: process.platform === 'win32' ? undefined : 1000,
     env: {
       PATH: '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-      HOME: '/tmp/worker-home',
+      HOME: '/tmp',
       TMPDIR: '/tmp',
       LANG: 'C.UTF-8',
       CI: 'true'
@@ -137,6 +137,4 @@ app.post('/git-clone', async (request, reply) => {
 app.get('/health', async () => ({ status: 'ok' }));
 
 await fs.mkdir(root, { recursive: true, mode: 0o700 });
-await fs.mkdir('/tmp/worker-home', { recursive: true, mode: 0o700 });
-if (process.platform !== 'win32') await fs.chown('/tmp/worker-home', 1000, 1000);
 await app.listen({ host: '0.0.0.0', port: 3010 });
