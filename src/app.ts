@@ -58,9 +58,12 @@ export async function buildApp(config: Config): Promise<FastifyInstance> {
 
   await app.register(helmet, { contentSecurityPolicy: false });
   await app.register(formbody);
+  const trustedOrigins = new Set(config.allowedOrigins);
+  if (config.PUBLIC_BASE_URL) trustedOrigins.add(new URL(config.PUBLIC_BASE_URL).origin);
+  if (config.DOMAIN) trustedOrigins.add(`https://${config.DOMAIN}`);
   await app.register(cors, {
     origin(origin, callback) {
-      if (!origin || config.allowedOrigins.includes(origin)) callback(null, true);
+      if (!origin || trustedOrigins.has(origin)) callback(null, true);
       else callback(new Error('Origem CORS não permitida'), false);
     },
     methods: ['GET', 'POST', 'DELETE']

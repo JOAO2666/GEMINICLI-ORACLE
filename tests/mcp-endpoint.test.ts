@@ -40,7 +40,9 @@ describe('Remote MCP endpoint', () => {
     const verifier = crypto.randomBytes(48).toString('base64url');
     const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
     const authorization = await app.inject({
-      method: 'POST', url: '/oauth/authorize', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      method: 'POST', url: '/oauth/authorize', headers: {
+        'content-type': 'application/x-www-form-urlencoded', origin: 'https://example.test'
+      },
       payload: new URLSearchParams({
         response_type: 'code', client_id: clientId, redirect_uri: 'http://127.0.0.1/callback',
         state: 'test-state', code_challenge: challenge, code_challenge_method: 'S256',
