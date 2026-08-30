@@ -37,7 +37,7 @@ Alternativas:
 ## Instalação na VM
 
 ```bash
-git clone <URL-DO-SEU-REPOSITORIO> numia-gemini-server
+git clone https://github.com/JOAO2666/GEMINICLI-ORACLE.git numia-gemini-server
 cd numia-gemini-server
 cp .env.example .env
 openssl rand -hex 32
@@ -102,7 +102,7 @@ Use um token de 32 caracteres ou mais. Em desenvolvimento, `REQUIRE_HTTPS` não 
 4. Chame `POST /api/chat/stream` com texto, `conversationId` e `attachmentIds`.
 5. Leia cada linha SSE `data:` e acrescente eventos `delta` à mensagem visível.
 
-Veja [documentação da API](docs/API.md) e [integração Android](docs/ANDROID.md).
+Veja o [guia rápido em português](docs/GUIA_RAPIDO.md), a [documentação da API](docs/API.md) e a [integração Android](docs/ANDROID.md).
 
 ## Servidor MCP remoto
 
@@ -132,7 +132,7 @@ O custo é reenviar parte do histórico. `MAX_HISTORY_CHARS` limita esse context
 
 ## Modelos
 
-O CLI possui `agy models`. `GET /api/models` cruza a descoberta real com `ALLOWED_MODELS`, portanto apenas modelos simultaneamente disponíveis e autorizados são retornados. O servidor nunca aceita esse valor como argumento arbitrário. Os slugs confirmados nesta conta incluem `gemini-3.1-pro-high` e `gemini-3.1-pro-low`.
+O CLI possui `agy models`. `GET /api/models` cruza a descoberta real com `ALLOWED_MODELS`, portanto apenas modelos simultaneamente disponíveis e autorizados são retornados. O servidor nunca aceita esse valor como argumento arbitrário. Um modelo novo não é habilitado automaticamente: confirme o slug com `agy models`, inclua-o em `ALLOWED_MODELS` e recrie o serviço. Essa allowlist evita que uma mudança externa selecione um modelo inesperado.
 
 ## Atualização segura do Antigravity CLI
 

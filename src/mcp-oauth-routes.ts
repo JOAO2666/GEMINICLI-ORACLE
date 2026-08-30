@@ -107,7 +107,11 @@ export async function registerMcpOAuthRoutes(app: FastifyInstance, config: Confi
     return { input, client };
   };
 
-  app.get('/oauth/authorize', async (request, reply) => {
+  // The consent page is a normal browser navigation/form POST. CORS does not
+  // protect HTML forms and must not prevent OAuth clients from completing the
+  // redirect flow. The access key, registered redirect URI and PKCE still
+  // protect authorization.
+  app.get('/oauth/authorize', { config: { cors: { origin: false } } }, async (request, reply) => {
     const { input, client } = validateAuthorization(request.query);
     const hidden = Object.entries(input).map(([key, value]) =>
       `<input type="hidden" name="${escapeHtml(key)}" value="${escapeHtml(String(value))}">`).join('');
@@ -118,7 +122,7 @@ export async function registerMcpOAuthRoutes(app: FastifyInstance, config: Confi
 <body><main class="box"><h1>Autorizar conexão MCP</h1><p><strong>${escapeHtml(client.clientName)}</strong> deseja usar ferramentas de workspace, arquivos, terminal isolado e automação.</p><p><small>O Gemini pedirá confirmação antes de ações de escrita. Só autorize uma conexão iniciada por você.</small></p><form method="post" action="/oauth/authorize">${hidden}<label>Código de acesso do servidor<input type="password" name="access_key" required autocomplete="off"></label><button type="submit">Autorizar</button></form></main></body></html>`);
   });
 
-  app.post('/oauth/authorize', async (request, reply) => {
+  app.post('/oauth/authorize', { config: { cors: { origin: false } } }, async (request, reply) => {
     const raw = z.record(z.string(), z.unknown()).parse(request.body);
     const { input } = validateAuthorization(raw);
     const accessKey = typeof raw.access_key === 'string' ? raw.access_key : '';
