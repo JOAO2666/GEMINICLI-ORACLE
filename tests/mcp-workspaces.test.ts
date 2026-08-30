@@ -7,13 +7,14 @@ import { McpWorkspaceService } from '../src/mcp-workspaces.js';
 import type { AIProvider } from '../src/types.js';
 
 const dirs: string[] = [];
+let lastPrompt = '';
 afterEach(() => dirs.splice(0).forEach((dir) => fs.rmSync(dir, { recursive: true, force: true })));
 
 const provider: AIProvider = {
   supportsFiles: () => true,
   listModels: async () => [],
   checkAuthentication: async () => ({ available: true, authenticated: true }),
-  sendMessage: async () => 'ok',
+  sendMessage: async (request) => { lastPrompt = request.prompt; return 'ok'; },
   async *streamMessage() { yield { type: 'complete' as const, text: 'ok', conversationId: 'test' }; },
   cancel: () => false
 };
@@ -38,6 +39,9 @@ describe('MCP workspace isolation', () => {
     expect(await workspaces.listFiles(id)).toMatchObject({ entries: expect.arrayContaining([
       expect.objectContaining({ path: 'docs/resposta.txt', type: 'file' })
     ]) });
+    await workspaces.goalRun(id, 'Crie um arquivo.');
+    expect(lastPrompt).toContain(path.join(config.mcpWorkspacesDir, id));
+    expect(lastPrompt).toContain('Nunca use o diretório scratch');
     await expect(workspaces.readFile(id, '../fora.txt')).rejects.toThrow('fora do workspace');
     expect(await workspaces.remove(id)).toMatchObject({ deleted: true, recoverable: true });
     await expect(workspaces.info(id)).rejects.toThrow('não encontrado');

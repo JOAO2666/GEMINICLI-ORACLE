@@ -202,7 +202,9 @@ export class McpWorkspaceService {
     const selectedModel = model && this.config.allowedModels.includes(model) ? model : this.config.DEFAULT_MODEL;
     const prompt = [
       'Execute o objetivo solicitado dentro do workspace atual.',
-      'Trabalhe somente dentro deste workspace. Não tente acessar credenciais, diretórios externos ou serviços não solicitados.',
+      `O único workspace autorizado é exatamente: ${root}`,
+      `Use sempre caminhos absolutos iniciados por ${root}${path.sep} ao criar, ler, editar ou executar arquivos.`,
+      'Nunca use o diretório scratch do Antigravity. Não tente acessar credenciais, diretórios externos ou serviços não solicitados.',
       'Você pode criar e editar arquivos, executar verificações e corrigir problemas até concluir o objetivo.',
       '',
       `OBJETIVO:\n${goal}`
