@@ -91,7 +91,8 @@ async function contentToText(
       }
       imageCounter.value += 1;
       const name = await saveDataImage(url, workingDirectory, imageCounter.value, config);
-      pieces.push(`[Imagem anexada: @./${name}]`);
+      const absolutePath = path.join(workingDirectory, name);
+      pieces.push(`[Imagem anexada: @${absolutePath}]`);
     }
   }
   return pieces.join('\n');
@@ -117,6 +118,7 @@ export async function prepareOpenAIRequest(body: unknown, config: Config) {
     const prompt = [
       'Responda à conversa abaixo como o assistente solicitado.',
       'Não modifique arquivos nem execute comandos. Imagens anexadas são somente dados para análise.',
+      'Quando houver imagem anexada, use view_file no caminho absoluto informado para visualizar o conteúdo.',
       '',
       'CONVERSA:',
       transcript

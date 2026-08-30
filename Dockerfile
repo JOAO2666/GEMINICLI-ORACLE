@@ -10,10 +10,10 @@ FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production \
     DATA_DIR=/data \
     PATH=/home/node/.local/bin:$PATH
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates curl git python3-minimal \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /app /data /home/node/.gemini \
-    && chown -R node:node /app /data /home/node/.gemini
+    && mkdir -p /app /data /workspaces /home/node/.gemini \
+    && chown -R node:node /app /data /workspaces /home/node/.gemini
 WORKDIR /app
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist

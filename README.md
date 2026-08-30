@@ -13,7 +13,7 @@ NumIA Android ──HTTPS/Bearer──> Fastify ──spawn(args[])──> Antig
        └─ recebe SSE               └─ fila/timeout/limpeza         em volume separado
 ```
 
-O servidor usa SQLite para conversas e histórico. Cada chamada cria uma execução headless do `agy` em modo `plan` + sandbox dentro da pasta isolada da conversa. Os anexos são indicados com caminhos `@./arquivo`. A saída oficial `stream-json` (JSONL) é convertida em eventos SSE simples para o NumIA.
+O servidor usa SQLite para conversas e histórico. Cada chamada cria uma execução headless do `agy` em modo `plan` + sandbox dentro da pasta isolada da conversa. Imagens do NumIA são salvas temporariamente e abertas pelo caminho absoluto isolado. A saída oficial `stream-json` (JSONL) é convertida em eventos SSE simples para o NumIA.
 
 ## Escolha de hospedagem
 
@@ -103,6 +103,21 @@ Use um token de 32 caracteres ou mais. Em desenvolvimento, `REQUIRE_HTTPS` não 
 5. Leia cada linha SSE `data:` e acrescente eventos `delta` à mensagem visível.
 
 Veja [documentação da API](docs/API.md) e [integração Android](docs/ANDROID.md).
+
+## Servidor MCP remoto
+
+Com `MCP_ENABLED=true`, o mesmo domínio também publica um endpoint Streamable HTTP em `https://SEU-DOMINIO/mcp`. Ele aceita a chave privada do NumIA como Bearer e também oferece OAuth 2.0 com cadastro dinâmico, PKCE e tela de autorização para clientes como Gemini Spark.
+
+As 16 ferramentas disponíveis são `goal_run`, `skill_list`, `skill_read`, `skill_resources`, `skill_install`, `workspace_create`, `workspace_delete`, `workspace_info`, `shell_execute`, `file_list`, `file_read`, `file_write`, `file_edit`, `git_clone`, `artifact_list` e `artifact_publish`.
+
+- Arquivos e comandos ficam em workspaces dedicados no volume `mcp-workspaces`.
+- Comandos rodam em um serviço separado, sem o volume das credenciais Google e com limites de memória, processos, tempo e saída.
+- Exclusão de workspace move os dados para uma lixeira recuperável.
+- `git_clone` aceita somente repositórios públicos HTTPS do GitHub.
+- Artefatos publicados recebem URLs HTTPS com identificadores aleatórios.
+- Clientes compatíveis devem solicitar confirmação do usuário antes das ferramentas marcadas como escrita ou destrutivas.
+
+Defina `MCP_WORKER_TOKEN` com outro valor aleatório de pelo menos 32 caracteres; ele deve ser diferente de `NUMIA_SERVER_TOKEN` e nunca deve ser enviado ao aplicativo ou versionado.
 
 ## Sessões e histórico
 

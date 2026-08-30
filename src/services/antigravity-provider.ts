@@ -23,11 +23,16 @@ class AsyncChannel {
 }
 
 function safeEnvironment(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
-  delete env.GEMINI_API_KEY;
-  delete env.GOOGLE_API_KEY;
-  delete env.GOOGLE_APPLICATION_CREDENTIALS;
-  return env;
+  return {
+    PATH: process.env.PATH,
+    HOME: process.env.HOME,
+    USER: process.env.USER,
+    LOGNAME: process.env.LOGNAME,
+    LANG: process.env.LANG ?? 'C.UTF-8',
+    LC_ALL: process.env.LC_ALL,
+    TERM: process.env.TERM ?? 'dumb',
+    TMPDIR: process.env.TMPDIR ?? '/tmp'
+  };
 }
 
 function objectValue(value: unknown): Record<string, unknown> {
@@ -109,10 +114,12 @@ export class AntigravityCLIProvider implements AIProvider {
         '--prompt', request.prompt,
         '--model', request.model,
         '--output-format', 'stream-json',
-        '--mode', 'plan',
+        '--mode', request.executionMode ?? 'plan',
         '--sandbox',
         '--print-timeout', `${timeoutSeconds}s`
       ];
+      if (request.effort) args.push('--effort', request.effort);
+      if (request.autoApprove) args.push('--dangerously-skip-permissions');
       const channel = new AsyncChannel();
       const child = spawn(this.config.AGY_COMMAND, args, {
         cwd: request.workingDirectory,

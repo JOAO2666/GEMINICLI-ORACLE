@@ -1,7 +1,10 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import path from 'node:path';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
+import formbody from '@fastify/formbody';
 import helmet from '@fastify/helmet';
 import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
@@ -15,12 +18,20 @@ import { FileService } from './services/files.js';
 import { AntigravityCLIProvider } from './services/antigravity-provider.js';
 import type { ProviderEvent } from './types.js';
 import { openAIChunk, openAICompletion, openAIModelList, prepareOpenAIRequest } from './openai-compat.js';
+import { McpAuthStore } from './mcp-auth.js';
+import { mcpPublicUrls, registerMcpOAuthRoutes } from './mcp-oauth-routes.js';
+import { createWorkspaceMcpEndpoint, type McpEndpoint } from './mcp-server.js';
+import { McpWorkspaceService } from './mcp-workspaces.js';
 
 function tokenMatches(header: string | undefined, expected: string): boolean {
   if (!header?.startsWith('Bearer ')) return false;
   const actual = Buffer.from(header.slice(7));
   const wanted = Buffer.from(expected);
   return actual.length === wanted.length && crypto.timingSafeEqual(actual, wanted);
+}
+
+function bearerToken(header: string | undefined): string | null {
+  return header?.startsWith('Bearer ') ? header.slice(7) : null;
 }
 
 function publicError(error: unknown) {
@@ -40,8 +51,13 @@ export async function buildApp(config: Config): Promise<FastifyInstance> {
   const files = new FileService(config, db);
   const chats = new ChatService(config, db);
   const provider = new AntigravityCLIProvider(config);
+  let mcpAuth: McpAuthStore | undefined;
+  let mcpEndpoint: McpEndpoint | undefined;
+  let mcpWorkspaces: McpWorkspaceService | undefined;
+  let mcpResource = '';
 
   await app.register(helmet, { contentSecurityPolicy: false });
+  await app.register(formbody);
   await app.register(cors, {
     origin(origin, callback) {
       if (!origin || config.allowedOrigins.includes(origin)) callback(null, true);
@@ -54,7 +70,17 @@ export async function buildApp(config: Config): Promise<FastifyInstance> {
     limits: { fileSize: config.MAX_UPLOAD_BYTES, files: config.MAX_FILES_PER_UPLOAD, fields: 4, parts: config.MAX_FILES_PER_UPLOAD + 4 }
   });
 
-  app.addHook('onRequest', async (request) => {
+  if (config.MCP_ENABLED) {
+    if (config.MCP_WORKER_TOKEN.length < 32) throw new Error('MCP_WORKER_TOKEN precisa ter pelo menos 32 caracteres.');
+    mcpAuth = new McpAuthStore(config.dataDir);
+    mcpWorkspaces = new McpWorkspaceService(config, provider);
+    await mcpWorkspaces.initialize();
+    await registerMcpOAuthRoutes(app, config, mcpAuth);
+    mcpResource = mcpPublicUrls(config).resource;
+    mcpEndpoint = createWorkspaceMcpEndpoint(mcpWorkspaces, (error) => app.log.error({ err: error }, 'MCP error'));
+  }
+
+  app.addHook('onRequest', async (request, reply) => {
     if (config.NODE_ENV === 'production' && config.REQUIRE_HTTPS && request.protocol !== 'https') {
       throw new AppError(426, 'HTTPS_REQUIRED', 'HTTPS é obrigatório.');
     }
@@ -63,6 +89,15 @@ export async function buildApp(config: Config): Promise<FastifyInstance> {
       || pathname === '/v1/models' || pathname === '/v1/chat/completions';
     if (protectedRoute && !tokenMatches(request.headers.authorization, config.NUMIA_SERVER_TOKEN)) {
       throw new AppError(401, 'UNAUTHORIZED', 'Token de acesso inválido.');
+    }
+    if (pathname === '/mcp') {
+      const token = bearerToken(request.headers.authorization);
+      const staticAccess = tokenMatches(request.headers.authorization, config.NUMIA_SERVER_TOKEN);
+      const oauthAccess = token && mcpAuth?.validateAccessToken(token, mcpResource);
+      if (!staticAccess && !oauthAccess) {
+        reply.header('WWW-Authenticate', `Bearer resource_metadata="${mcpPublicUrls(config).protectedMetadata}", scope="mcp:tools"`);
+        throw new AppError(401, 'UNAUTHORIZED', 'Autorize a conexão MCP.');
+      }
     }
   });
 
@@ -73,6 +108,25 @@ export async function buildApp(config: Config): Promise<FastifyInstance> {
   });
 
   app.get('/health', async () => ({ status: 'ok' }));
+  if (mcpEndpoint && mcpWorkspaces) {
+    const endpoint = mcpEndpoint;
+    const workspaces = mcpWorkspaces;
+    app.route({
+      method: ['GET', 'POST', 'DELETE'],
+      url: '/mcp',
+      handler: async (request, reply) => {
+        reply.hijack();
+        await endpoint.nodeHandler(request.raw, reply.raw, request.body);
+      }
+    });
+    app.get('/artifacts/:workspaceId/:artifactId/:name', async (request, reply) => {
+      const params = request.params as { workspaceId: string; artifactId: string; name: string };
+      const filePath = await workspaces.artifactPath(params.workspaceId, params.artifactId, params.name);
+      reply.header('Cache-Control', 'private, max-age=86400');
+      reply.header('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(filePath))}`);
+      return reply.type('application/octet-stream').send(createReadStream(filePath));
+    });
+  }
   app.get('/api/provider/status', async () => provider.checkAuthentication());
   app.get('/api/gemini/status', async () => provider.checkAuthentication());
   app.get('/api/models', async () => ({ models: await provider.listModels(), discovery: 'agy models + allowlist' }));
@@ -97,7 +151,8 @@ export async function buildApp(config: Config): Promise<FastifyInstance> {
           conversationId: prepared.conversationId,
           prompt: prepared.prompt,
           model,
-          workingDirectory: prepared.workingDirectory
+          workingDirectory: prepared.workingDirectory,
+          autoApprove: prepared.imageCount > 0
         });
         return openAICompletion(id, created, model, text);
       } finally {
@@ -123,6 +178,7 @@ export async function buildApp(config: Config): Promise<FastifyInstance> {
         prompt: prepared.prompt,
         model,
         workingDirectory: prepared.workingDirectory,
+        autoApprove: prepared.imageCount > 0,
         signal: controller.signal
       })) {
         if (event.type === 'delta') emit(openAIChunk(id, created, model, { content: event.text }));
@@ -237,6 +293,11 @@ export async function buildApp(config: Config): Promise<FastifyInstance> {
     if (count) app.log.info({ count }, 'expired attachments removed');
   }).catch((error) => app.log.error({ err: error }, 'attachment cleanup failed')), 60 * 60 * 1000);
   cleanup.unref();
-  app.addHook('onClose', async () => { clearInterval(cleanup); db.close(); });
+  app.addHook('onClose', async () => {
+    clearInterval(cleanup);
+    await mcpEndpoint?.handler.close();
+    mcpAuth?.close();
+    db.close();
+  });
   return app;
 }

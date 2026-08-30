@@ -6,6 +6,8 @@ const positiveInt = (fallback: number) => z.coerce.number().int().positive().def
 
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  DOMAIN: z.string().default(''),
+  PUBLIC_BASE_URL: z.string().default(''),
   HOST: z.string().default('0.0.0.0'),
   PORT: positiveInt(3000),
   NUMIA_SERVER_TOKEN: z.string().min(32),
@@ -13,6 +15,11 @@ const envSchema = z.object({
   ALLOWED_MODELS: z.string().default('gemini-3.1-pro-high,gemini-3.1-pro-low'),
   DEFAULT_MODEL: z.string().default('gemini-3.1-pro-high'),
   VISION_MODEL: z.string().default(''),
+  MCP_ENABLED: bool,
+  MCP_WORKSPACES_DIR: z.string().default(''),
+  MCP_WORKER_URL: z.string().url().default('http://workspace-worker:3010'),
+  MCP_WORKER_TOKEN: z.string().default(''),
+  MCP_COMMAND_TIMEOUT_MS: positiveInt(60_000),
   MAX_GEMINI_PROCESSES: positiveInt(2),
   AGY_TIMEOUT_MS: positiveInt(300_000),
   AGY_COMMAND: z.string().default('agy'),
@@ -46,6 +53,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     allowedModels,
     visionModel,
     allowedOrigins: parsed.ALLOWED_ORIGINS.split(',').map((v) => v.trim()).filter(Boolean),
-    dataDir: path.resolve(parsed.DATA_DIR)
+    dataDir: path.resolve(parsed.DATA_DIR),
+    mcpWorkspacesDir: path.resolve(parsed.MCP_WORKSPACES_DIR || path.join(parsed.DATA_DIR, 'mcp-workspaces'))
   };
 }

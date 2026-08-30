@@ -20,6 +20,9 @@ export interface ProviderRequest {
   model: string;
   workingDirectory: string;
   signal?: AbortSignal;
+  executionMode?: 'plan' | 'accept-edits';
+  effort?: 'low' | 'medium' | 'high';
+  autoApprove?: boolean;
 }
 
 export interface ProviderStatus {

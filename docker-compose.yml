@@ -1,5 +1,6 @@
 services:
   server:
+    image: numia-gemini-server:latest
     build:
       context: .
     restart: unless-stopped
@@ -7,13 +8,51 @@ services:
     environment:
       NODE_ENV: production
       DATA_DIR: /data
+      MCP_WORKSPACES_DIR: /workspaces
+      MCP_WORKER_URL: http://workspace-worker:3010
     volumes:
       - antigravity-auth:/home/node/.gemini
       - numia-data:/data
+      - mcp-workspaces:/workspaces
     expose:
       - "3000"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health',{headers:{'x-forwarded-proto':'https'}}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    depends_on:
+      workspace-worker:
+        condition: service_healthy
+
+  workspace-worker:
+    image: numia-gemini-server:latest
+    restart: unless-stopped
+    env_file: .env
+    user: "0:0"
+    command: ["node", "dist/worker-server.js"]
+    environment:
+      WORKSPACES_DIR: /workspaces
+      MCP_COMMAND_TIMEOUT_MS: 60000
+    volumes:
+      - mcp-workspaces:/workspaces
+    expose:
+      - "3010"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=128m
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - KILL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3010/health',{headers:{authorization:'Bearer '+process.env.MCP_WORKER_TOKEN}}).then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -49,5 +88,6 @@ services:
 volumes:
   antigravity-auth:
   numia-data:
+  mcp-workspaces:
   caddy-data:
   caddy-config:

@@ -41,7 +41,8 @@ describe('OpenAI compatibility', () => {
       ] }]
     }, config);
     expect(prepared.imageCount).toBe(1);
-    expect(prepared.prompt).toContain('@./numia-image-1.png');
+    expect(prepared.prompt).toContain(`@${path.join(prepared.workingDirectory, 'numia-image-1.png')}`);
+    expect(prepared.prompt).toContain('use view_file no caminho absoluto');
     await prepared.cleanup();
   });
 
