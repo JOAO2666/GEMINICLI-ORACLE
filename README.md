@@ -40,6 +40,8 @@ Alternativas:
 
 Baixe ou clone o repositório em um computador Windows e execute `INSTALAR_AUTOMATICO.bat`. O assistente configura uma VM Linux já criada, gera chaves privadas, instala/inicia o Docker e conduz o login oficial do Google. Ele não cria recursos na Oracle e não modifica faturamento; a VM deve ter sido criada manualmente como Always Free.
 
+Se a instalação já existe e somente a sessão Google do servidor expirou, execute `RECONECTAR_AGY.bat`. Esse segundo assistente refaz apenas o login oficial do `agy`, reinicia o backend e testa a descoberta de modelos. Ele não altera `NUMIA_SERVER_TOKEN`, configuração do NumIA, autorização MCP, dados, volumes ou faturamento.
+
 ### Opção manual
 
 ```bash
@@ -78,6 +80,19 @@ docker compose --profile login run --rm antigravity-login agy -p "Responda somen
 ```
 
 Se o modelo não estiver disponível, `agy` encerra com erro. Consulte os slugs liberados para a conta com `agy models` e ajuste a allowlist.
+
+### Recuperar uma sessão Google expirada
+
+No Windows, a opção recomendada é dar duplo clique em `RECONECTAR_AGY.bat`. Para fazer manualmente, conecte-se à VM e execute:
+
+```bash
+cd /home/opc/numia-gemini
+sudo docker compose --profile login run --rm antigravity-login
+sudo docker compose restart server
+sudo docker compose --profile login run --rm antigravity-login agy models
+```
+
+O login no `agy` de outro computador normalmente cria uma sessão separada e não desconecta o servidor. Se a sessão remota for revogada ou expirar, a API permanece online, mas as chamadas de IA retornam `GEMINI_AUTH_REQUIRED` até esse procedimento ser concluído. Não execute `docker compose down -v`, porque `-v` remove o volume da autenticação.
 
 ### Iniciar e sobreviver a reinicializações
 

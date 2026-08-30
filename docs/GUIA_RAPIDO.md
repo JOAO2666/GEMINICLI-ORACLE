@@ -25,6 +25,8 @@ O método manual abaixo continua disponível. Para uma instalação assistida:
 
 O instalador pode ser executado novamente para atualizar o projeto. Ele preserva `.env`, chaves, autenticação e volumes existentes. Ele não cria a VM, não acessa a área de faturamento e não transforma a conta Oracle em Pay As You Go.
 
+Se o projeto já está instalado e o problema é somente uma sessão Google expirada, use `RECONECTAR_AGY.bat`. Ele abre novamente o login oficial, reinicia somente o backend e testa a lista de modelos. A chave do NumIA, a conexão MCP, arquivos e volumes permanecem iguais.
+
 ## Instalação manual resumida na Oracle
 
 Use uma VM Ampere A1 que apareça como Always Free, abra somente as portas 22, 80 e 443 e instale Docker com o plugin Compose. Depois:
@@ -59,6 +61,19 @@ Abra no seu navegador o endereço exibido, entre na conta Google autorizada e co
 As credenciais ficam no volume `antigravity-auth`. Reiniciar a VM, recriar o container ou atualizar o projeto normalmente **não exige novo login**. Será necessário entrar novamente se a sessão expirar, o Google revogar a autorização, houver uma mudança de segurança/senha que invalide a sessão, o volume for apagado ou a instalação for migrada sem esse volume.
 
 Não use `docker compose down -v`: a opção `-v` apaga a autenticação e os dados persistentes.
+
+### Recuperação rápida do login
+
+No Windows, execute `RECONECTAR_AGY.bat` e informe os mesmos IP, usuário, chave SSH, domínio e pasta usados na instalação. Para recuperação manual:
+
+```bash
+cd /home/opc/numia-gemini
+sudo docker compose --profile login run --rm antigravity-login
+sudo docker compose restart server
+sudo docker compose --profile login run --rm antigravity-login agy models
+```
+
+Se os modelos forem listados, a API voltou a usar a conta Google. Não é necessário trocar a chave no NumIA nem reconectar o MCP.
 
 Confira a sessão e inicie:
 
