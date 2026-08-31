@@ -16,8 +16,9 @@ import { chatSchema, conversationIdSchema, conversationMessageSchema, createConv
 import { ChatService } from './services/chat.js';
 import { FileService } from './services/files.js';
 import { AntigravityCLIProvider } from './services/antigravity-provider.js';
-import type { ProviderEvent } from './types.js';
+import type { AIProvider, ProviderEvent } from './types.js';
 import { openAIChunk, openAICompletion, openAIModelList, prepareOpenAIRequest } from './openai-compat.js';
+import { openAIToolCompletion, parseOpenAIToolDecision, type OpenAIToolDecision } from './openai-tools.js';
 import { McpAuthStore } from './mcp-auth.js';
 import { mcpPublicUrls, registerMcpOAuthRoutes } from './mcp-oauth-routes.js';
 import { createWorkspaceMcpEndpoint, type McpEndpoint } from './mcp-server.js';
@@ -44,13 +45,13 @@ function publicError(error: unknown) {
   return { statusCode: 500, code: 'INTERNAL_ERROR', message: 'Erro interno do servidor.' };
 }
 
-export async function buildApp(config: Config): Promise<FastifyInstance> {
+export async function buildApp(config: Config, options: { provider?: AIProvider } = {}): Promise<FastifyInstance> {
   await fs.mkdir(config.dataDir, { recursive: true, mode: 0o700 });
   const app = Fastify({ logger: { redact: ['req.headers.authorization', 'request.headers.authorization'] }, trustProxy: config.TRUST_PROXY });
   const db = new AppDatabase(config.dataDir);
   const files = new FileService(config, db);
   const chats = new ChatService(config, db);
-  const provider = new AntigravityCLIProvider(config);
+  const provider = options.provider ?? new AntigravityCLIProvider(config);
   let mcpAuth: McpAuthStore | undefined;
   let mcpEndpoint: McpEndpoint | undefined;
   let mcpWorkspaces: McpWorkspaceService | undefined;
@@ -150,6 +151,23 @@ export async function buildApp(config: Config): Promise<FastifyInstance> {
 
     if (!prepared.input.stream) {
       try {
+        if (prepared.toolContext) {
+          let decision: OpenAIToolDecision | undefined;
+          for await (const event of provider.streamMessage({
+            conversationId: prepared.conversationId,
+            prompt: prepared.prompt,
+            model,
+            workingDirectory: prepared.workingDirectory,
+            autoApprove: prepared.imageCount > 0,
+            jsonSchema: prepared.toolContext.outputSchema
+          })) {
+            if (event.type === 'complete') {
+              decision = parseOpenAIToolDecision(event.structuredOutput, event.text, prepared.toolContext);
+            }
+          }
+          if (!decision) throw new AppError(502, 'MISSING_TOOL_DECISION', 'O modelo não concluiu a decisão de ferramenta.');
+          return openAIToolCompletion(id, created, model, decision);
+        }
         const text = await provider.sendMessage({
           conversationId: prepared.conversationId,
           prompt: prepared.prompt,
@@ -176,6 +194,34 @@ export async function buildApp(config: Config): Promise<FastifyInstance> {
     const emit = (payload: unknown) => reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
     emit(openAIChunk(id, created, model, { role: 'assistant', content: '' }));
     try {
+      if (prepared.toolContext) {
+        let decision: OpenAIToolDecision | undefined;
+        for await (const event of provider.streamMessage({
+          conversationId: prepared.conversationId,
+          prompt: prepared.prompt,
+          model,
+          workingDirectory: prepared.workingDirectory,
+          autoApprove: prepared.imageCount > 0,
+          jsonSchema: prepared.toolContext.outputSchema,
+          signal: controller.signal
+        })) {
+          if (event.type === 'complete') {
+            decision = parseOpenAIToolDecision(event.structuredOutput, event.text, prepared.toolContext);
+          }
+        }
+        if (!decision) throw new AppError(502, 'MISSING_TOOL_DECISION', 'O modelo não concluiu a decisão de ferramenta.');
+        if (decision.type === 'message') {
+          if (decision.content) emit(openAIChunk(id, created, model, { content: decision.content }));
+          emit(openAIChunk(id, created, model, {}, 'stop'));
+        } else {
+          decision.toolCalls.forEach((toolCall, index) => emit(openAIChunk(id, created, model, {
+            tool_calls: [{ index, ...toolCall }]
+          })));
+          emit(openAIChunk(id, created, model, {}, 'tool_calls'));
+        }
+        reply.raw.write('data: [DONE]\n\n');
+        return;
+      }
       for await (const event of provider.streamMessage({
         conversationId: prepared.conversationId,
         prompt: prepared.prompt,

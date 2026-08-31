@@ -15,6 +15,8 @@ NumIA Android ──HTTPS/Bearer──> Fastify ──spawn(args[])──> Antig
 
 O servidor usa SQLite para conversas e histórico. Cada chamada cria uma execução headless do `agy` em modo `plan` + sandbox dentro da pasta isolada da conversa. Imagens do NumIA são salvas temporariamente e abertas pelo caminho absoluto isolado. A saída oficial `stream-json` (JSONL) é convertida em eventos SSE simples para o NumIA.
 
+Os endpoints OpenAI-compatible também aceitam Tool Calling/Function Calling. Quando o cliente envia `tools`, o backend usa saída estruturada do `agy`, valida nome e argumentos e retorna `assistant.tool_calls`; a execução continua sendo responsabilidade do cliente. Sem `tools`, o fluxo anterior de texto, streaming e imagens permanece o mesmo.
+
 ## Escolha de hospedagem
 
 **Recomendação: Oracle Cloud Always Free Ampere A1**, com Ubuntu e Docker. A oferta oficial atual inclui até 2 OCPUs/12 GB equivalentes no nível gratuito, embora possa haver falta de capacidade na região. É uma VM persistente e combina bem com OAuth, Docker, SQLite e SSE.

@@ -39,6 +39,22 @@ function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
 }
 
+export function buildAntigravityArgs(request: ProviderRequest, timeoutMs: number): string[] {
+  const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+  const args = [
+    '--prompt', request.prompt,
+    '--model', request.model,
+    '--output-format', 'stream-json',
+    '--mode', request.executionMode ?? 'plan',
+    '--sandbox',
+    '--print-timeout', `${timeoutSeconds}s`
+  ];
+  if (request.effort) args.push('--effort', request.effort);
+  if (request.autoApprove) args.push('--dangerously-skip-permissions');
+  if (request.jsonSchema) args.push('--json-schema', JSON.stringify(request.jsonSchema));
+  return args;
+}
+
 export class AntigravityCLIProvider implements AIProvider {
   private readonly semaphore: Semaphore;
   private readonly active = new Map<string, AbortController>();
@@ -109,17 +125,7 @@ export class AntigravityCLIProvider implements AIProvider {
 
     try {
       release = await this.semaphore.acquire(controller.signal);
-      const timeoutSeconds = Math.max(1, Math.ceil(this.config.AGY_TIMEOUT_MS / 1000));
-      const args = [
-        '--prompt', request.prompt,
-        '--model', request.model,
-        '--output-format', 'stream-json',
-        '--mode', request.executionMode ?? 'plan',
-        '--sandbox',
-        '--print-timeout', `${timeoutSeconds}s`
-      ];
-      if (request.effort) args.push('--effort', request.effort);
-      if (request.autoApprove) args.push('--dangerously-skip-permissions');
+      const args = buildAntigravityArgs(request, this.config.AGY_TIMEOUT_MS);
       const channel = new AsyncChannel();
       const child = spawn(this.config.AGY_COMMAND, args, {
         cwd: request.workingDirectory,
@@ -131,6 +137,7 @@ export class AntigravityCLIProvider implements AIProvider {
       let stderr = '';
       let sessionId: string | undefined;
       let stats: unknown;
+      let structuredOutput: unknown;
       let resultFailure: string | undefined;
       let settled = false;
 
@@ -169,6 +176,7 @@ export class AntigravityCLIProvider implements AIProvider {
           const result = objectValue(event.result);
           sessionId = typeof result.conversation_id === 'string' ? result.conversation_id : sessionId;
           stats = result.usage;
+          structuredOutput = result.structured_output;
           if (typeof result.response === 'string') response = result.response;
           if (result.status !== 'SUCCESS') resultFailure = typeof result.error === 'string' ? result.error : `Status ${String(result.status)}`;
         }
@@ -188,7 +196,9 @@ export class AntigravityCLIProvider implements AIProvider {
         if (controller.signal.aborted) channel.push({ error: new AppError(499, 'REQUEST_CANCELLED', 'Geração cancelada.') });
         else if (code !== 0) channel.push({ error: publicProviderError(`${stderr}\n${resultFailure ?? ''}`, code) });
         else if (resultFailure) channel.push({ error: publicProviderError(resultFailure, code) });
-        else channel.push({ event: { type: 'complete', text: response, conversationId: request.conversationId, sessionId, stats } });
+        else channel.push({ event: {
+          type: 'complete', text: response, conversationId: request.conversationId, sessionId, stats, structuredOutput
+        } });
         channel.push({ done: true });
       });
 

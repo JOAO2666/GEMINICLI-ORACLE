@@ -11,7 +11,7 @@ export type ProviderEvent =
   | { type: 'start'; conversationId: string; model?: string; sessionId?: string }
   | { type: 'delta'; text: string }
   | { type: 'tool'; name: string; status: 'running' | 'success' | 'error' }
-  | { type: 'complete'; text: string; conversationId: string; sessionId?: string; stats?: unknown }
+  | { type: 'complete'; text: string; conversationId: string; sessionId?: string; stats?: unknown; structuredOutput?: unknown }
   | { type: 'error'; code: string; message: string };
 
 export interface ProviderRequest {
@@ -23,6 +23,7 @@ export interface ProviderRequest {
   executionMode?: 'plan' | 'accept-edits';
   effort?: 'low' | 'medium' | 'high';
   autoApprove?: boolean;
+  jsonSchema?: Record<string, unknown>;
 }
 
 export interface ProviderStatus {

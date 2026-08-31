@@ -23,6 +23,110 @@ Requisições do NumIA que contenham imagens são encaminhadas automaticamente a
 definido em `VISION_MODEL` (por padrão, `gemini-3.7-flash-low`), mesmo quando o botão de
 raciocínio estiver selecionado.
 
+## OpenAI Tool Calling
+
+`POST /chat/completions` e `POST /v1/chat/completions` aceitam `tools`, `tool_choice`,
+`parallel_tool_calls`, mensagens `role=tool` e `assistant.tool_calls`. Quando `tools` não
+é enviado (ou é uma lista vazia), o fluxo legado permanece inalterado.
+
+O servidor apenas permite que o modelo **solicite** funções. Ele não executa as ferramentas
+recebidas e não as conecta automaticamente ao `/mcp`. O cliente executa a função ou MCP e
+envia o resultado em uma nova requisição.
+
+Exemplo de solicitação:
+
+```json
+{
+  "model": "gemini-3.7-flash-high",
+  "messages": [
+    { "role": "user", "content": "Qual é a hora atual? Use a ferramenta." }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_current_time",
+        "description": "Returns the current time",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}
+```
+
+Resposta quando o modelo solicita a função:
+
+```json
+{
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_ID_UNICO",
+            "type": "function",
+            "function": {
+              "name": "get_current_time",
+              "arguments": "{}"
+            }
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ]
+}
+```
+
+Depois de executar a função, o cliente deve preservar a mensagem `assistant` acima e
+acrescentar o resultado com o mesmo ID:
+
+```json
+{
+  "model": "gemini-3.7-flash-high",
+  "messages": [
+    { "role": "user", "content": "Qual é a hora atual? Use a ferramenta." },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_ID_UNICO",
+          "type": "function",
+          "function": { "name": "get_current_time", "arguments": "{}" }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_ID_UNICO",
+      "content": "2026-08-31T10:30:00-03:00"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_current_time",
+        "parameters": { "type": "object", "properties": {} }
+      }
+    }
+  ]
+}
+```
+
+O modelo poderá responder normalmente ou solicitar outra função. Os nomes são limitados às
+ferramentas da requisição e os argumentos são validados novamente contra o JSON Schema.
+No streaming, as chamadas aparecem em `choices[0].delta.tool_calls` e o último chunk usa
+`finish_reason: "tool_calls"`.
+
 ## Saúde e disponibilidade
 
 ```bash

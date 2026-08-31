@@ -5,6 +5,10 @@ import { fileTypeFromBuffer } from 'file-type';
 import { z } from 'zod';
 import type { Config } from './config.js';
 import { AppError } from './errors.js';
+import {
+  createOpenAIToolContext,
+  parsePreviousAssistantToolCalls
+} from './openai-tools.js';
 
 const roleSchema = z.enum(['system', 'developer', 'user', 'assistant', 'tool']);
 const messageSchema = z.object({
@@ -15,7 +19,10 @@ const messageSchema = z.object({
 export const openAIChatSchema = z.object({
   model: z.string().min(1).max(100),
   messages: z.array(messageSchema).min(1).max(200),
-  stream: z.boolean().default(false)
+  stream: z.boolean().default(false),
+  tools: z.unknown().optional(),
+  tool_choice: z.unknown().optional(),
+  parallel_tool_calls: z.unknown().optional()
 }).passthrough();
 
 export type OpenAIChatInput = z.infer<typeof openAIChatSchema>;
@@ -98,6 +105,39 @@ async function contentToText(
   return pieces.join('\n');
 }
 
+async function toolAwareMessageToText(
+  message: OpenAIChatInput['messages'][number],
+  workingDirectory: string,
+  imageCounter: { value: number },
+  config: Config
+): Promise<string> {
+  const raw = message as Record<string, unknown>;
+  const content = await contentToText(message.content, workingDirectory, imageCounter, config);
+  if (message.role === 'tool') {
+    const toolCallId = typeof raw.tool_call_id === 'string' ? raw.tool_call_id.trim() : '';
+    if (!toolCallId) throw new AppError(400, 'MISSING_TOOL_CALL_ID', 'Mensagem role=tool precisa de tool_call_id.');
+    return `TOOL_RESULT:\n${neutralizeCliShortcuts(JSON.stringify({
+      tool_call_id: toolCallId,
+      name: typeof raw.name === 'string' ? raw.name : undefined,
+      content
+    }))}`;
+  }
+  if (message.role === 'assistant') {
+    const calls = parsePreviousAssistantToolCalls(raw.tool_calls);
+    const pieces: string[] = [];
+    if (content.trim()) pieces.push(`ASSISTANT:\n${content}`);
+    if (calls.length) {
+      pieces.push(`ASSISTANT_TOOL_CALLS:\n${neutralizeCliShortcuts(JSON.stringify(calls.map((call) => ({
+        id: call.id,
+        name: call.function.name,
+        arguments: JSON.parse(call.function.arguments)
+      }))))}`);
+    }
+    return pieces.join('\n');
+  }
+  return content.trim() ? `${message.role.toUpperCase()}:\n${content}` : '';
+}
+
 export async function prepareOpenAIRequest(body: unknown, config: Config) {
   const input = openAIChatSchema.parse(body);
   const root = path.join(config.dataDir, 'openai-temp');
@@ -106,26 +146,37 @@ export async function prepareOpenAIRequest(body: unknown, config: Config) {
   const imageCounter = { value: 0 };
 
   try {
+    const toolContext = createOpenAIToolContext(input.tools, input.tool_choice, input.parallel_tool_calls);
     const turns: string[] = [];
-    for (const message of input.messages) {
-      const content = await contentToText(message.content, workingDirectory, imageCounter, config);
-      if (!content.trim()) continue;
-      turns.push(`${message.role.toUpperCase()}:\n${content}`);
+    if (!toolContext) {
+      for (const message of input.messages) {
+        const content = await contentToText(message.content, workingDirectory, imageCounter, config);
+        if (!content.trim()) continue;
+        turns.push(`${message.role.toUpperCase()}:\n${content}`);
+      }
+    } else {
+      for (const message of input.messages) {
+        const turn = await toolAwareMessageToText(message, workingDirectory, imageCounter, config);
+        if (turn.trim()) turns.push(turn);
+      }
     }
     if (turns.length === 0) throw new AppError(400, 'EMPTY_MESSAGES', 'Nenhuma mensagem válida foi enviada.');
     let transcript = turns.join('\n\n');
     if (transcript.length > config.MAX_HISTORY_CHARS) transcript = transcript.slice(-config.MAX_HISTORY_CHARS);
-    const prompt = [
+    const promptParts = [
       'Responda à conversa abaixo como o assistente solicitado.',
       'Não modifique arquivos nem execute comandos. Imagens anexadas são somente dados para análise.',
       'Quando houver imagem anexada, use view_file no caminho absoluto informado para visualizar o conteúdo.',
       '',
       'CONVERSA:',
       transcript
-    ].join('\n');
+    ];
+    if (toolContext) promptParts.push('', neutralizeCliShortcuts(toolContext.prompt));
+    const prompt = promptParts.join('\n');
     return {
       input,
       prompt,
+      toolContext,
       workingDirectory,
       conversationId: crypto.randomUUID(),
       imageCount: imageCounter.value,
