@@ -238,6 +238,24 @@ describe('OpenAI Tool Calling', { timeout: 20_000 }, () => {
     }
   });
 
+  it('normalizes harmless inactive fields emitted by structured output', () => {
+    const context = createOpenAIToolContext([timeTool], 'auto');
+    expect(parseOpenAIToolDecision({
+      type: 'message', content: 'Workspace criado.', tool_calls: []
+    }, '', context!)).toEqual({ type: 'message', content: 'Workspace criado.' });
+
+    const call = parseOpenAIToolDecision({
+      type: 'tool_calls', content: null,
+      tool_calls: [{ name: 'get_current_time', arguments: '{}' }]
+    }, '', context!);
+    expect(call.type).toBe('tool_calls');
+    if (call.type === 'tool_calls') {
+      expect(call.toolCalls[0]?.function).toMatchObject({
+        name: 'get_current_time', arguments: '{}'
+      });
+    }
+  });
+
   it('rejects nonexistent tools and arguments that violate JSON Schema', () => {
     const context = createOpenAIToolContext([{
       type: 'function', function: {
