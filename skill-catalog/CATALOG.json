@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "upstream": {
+    "repository": "https://github.com/anthropics/skills",
+    "commit": "3b3fad96af16a10759d930941b4520ba0c40edae"
+  },
+  "includedOfficialApache2": [
+    "academy-guide",
+    "algorithmic-art",
+    "brand-guidelines",
+    "canvas-design",
+    "discernment-nudge",
+    "frontend-design",
+    "internal-comms",
+    "mcp-builder",
+    "skill-creator",
+    "slack-gif-creator",
+    "theme-factory",
+    "web-artifacts-builder",
+    "webapp-testing"
+  ],
+  "includedNumiaOriginal": [
+    "anki-apkg",
+    "document-pdf",
+    "document-docx",
+    "document-xlsx",
+    "document-pptx"
+  ],
+  "excluded": {
+    "claude-api": "Exige integração com serviços Anthropic e contraria o modo sem risco de cobrança.",
+    "doc-coauthoring": "Não possui arquivo de licença explícito no diretório da skill.",
+    "docx": "Licença oficial restringe o uso ao acordo de serviços Anthropic; substituída por document-docx.",
+    "pdf": "Licença oficial restringe o uso ao acordo de serviços Anthropic; substituída por document-pdf.",
+    "pptx": "Licença oficial restringe o uso ao acordo de serviços Anthropic; substituída por document-pptx.",
+    "xlsx": "Licença oficial restringe o uso ao acordo de serviços Anthropic; substituída por document-xlsx."
+  }
+}

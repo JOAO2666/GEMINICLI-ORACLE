@@ -19,6 +19,28 @@ function inside(parent: string, candidate: string): boolean {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
+function skillDescription(content: string): string {
+  const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)?.[1] ?? '';
+  const lines = frontmatter.split(/\r?\n/);
+  const index = lines.findIndex((line) => /^description:\s*/.test(line));
+  if (index === -1) return '';
+
+  let value = lines[index]!.replace(/^description:\s*/, '').trim();
+  if (value === '|' || value === '>') {
+    const separator = value === '>' ? ' ' : '\n';
+    const parts: string[] = [];
+    for (const line of lines.slice(index + 1)) {
+      if (!/^\s+/.test(line)) break;
+      parts.push(line.trim());
+    }
+    value = parts.join(separator).trim();
+  }
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1);
+  }
+  return value.trim().slice(0, 1_000);
+}
+
 async function pathSize(target: string): Promise<{ files: number; directories: number; bytes: number }> {
   const totals = { files: 0, directories: 0, bytes: 0 };
   const walk = async (directory: string) => {
@@ -42,11 +64,13 @@ export class McpWorkspaceService {
   private readonly root: string;
   private readonly trashRoot: string;
   private readonly artifactsRoot: string;
+  private readonly skillCatalogRoot: string;
 
   constructor(private readonly config: Config, private readonly provider: AIProvider) {
     this.root = config.mcpWorkspacesDir;
     this.trashRoot = path.join(this.root, '.trash');
     this.artifactsRoot = path.join(config.dataDir, 'mcp-artifacts');
+    this.skillCatalogRoot = config.skillCatalogDir;
   }
 
   async initialize(): Promise<void> {
@@ -55,6 +79,13 @@ export class McpWorkspaceService {
       fs.mkdir(this.trashRoot, { recursive: true, mode: 0o700 }),
       fs.mkdir(this.artifactsRoot, { recursive: true, mode: 0o700 })
     ]);
+    if (this.config.MCP_AUTO_INSTALL_SKILLS) {
+      for (const entry of await fs.readdir(this.root, { withFileTypes: true })) {
+        if (entry.isDirectory() && workspaceIdPattern.test(entry.name)) {
+          await this.installCatalogSkills(entry.name, [], false);
+        }
+      }
+    }
   }
 
   private async workspaceRoot(workspaceId: string): Promise<string> {
@@ -92,8 +123,14 @@ export class McpWorkspaceService {
     // UID 1000 for commands. It needs traverse-only access before dropping UID;
     // files themselves remain private (0600) and the volume is not public.
     await fs.mkdir(root, { recursive: false, mode: 0o755 });
-    await fs.writeFile(path.join(root, '.workspace.json'), JSON.stringify(metadata, null, 2), { mode: 0o600, flag: 'wx' });
-    return metadata;
+    try {
+      await fs.writeFile(path.join(root, '.workspace.json'), JSON.stringify(metadata, null, 2), { mode: 0o600, flag: 'wx' });
+      const skills = this.config.MCP_AUTO_INSTALL_SKILLS ? await this.installCatalogSkills(id, [], false) : undefined;
+      return { ...metadata, ...(skills ? { skillsInstalled: skills.installed } : {}) };
+    } catch (error) {
+      await fs.rm(root, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   async remove(workspaceId: string): Promise<Record<string, unknown>> {
@@ -206,6 +243,9 @@ export class McpWorkspaceService {
       `Use sempre caminhos absolutos iniciados por ${root}${path.sep} ao criar, ler, editar ou executar arquivos.`,
       'Nunca use o diretório scratch do Antigravity. Não tente acessar credenciais, diretórios externos ou serviços não solicitados.',
       'Você pode criar e editar arquivos, executar verificações e corrigir problemas até concluir o objetivo.',
+      `As skills disponíveis ficam em ${path.join(root, '.agents', 'skills')}. Consulte o SKILL.md da skill relevante antes de agir e use seus recursos somente quando forem úteis ao objetivo.`,
+      'Algumas skills foram originalmente escritas para Claude. Nesse conteúdo, interprete "Claude" como o agente atual e adapte Read/Write/Bash/create_file às ferramentas locais disponíveis.',
+      'Nunca instale nem chame Claude, Anthropic API, OpenAI API ou qualquer serviço pago. Use somente o modelo já autenticado no servidor e ferramentas locais gratuitas.',
       '',
       `OBJETIVO:\n${goal}`
     ].join('\n');
@@ -222,29 +262,155 @@ export class McpWorkspaceService {
   }
 
   async skillList(workspaceId: string): Promise<Record<string, unknown>> {
-    const { target } = await this.safePath(workspaceId, '.skills', true);
-    const entries = await fs.readdir(target, { withFileTypes: true }).catch(() => []);
-    return { workspaceId, skills: entries.filter((entry) => entry.isDirectory() && skillNamePattern.test(entry.name)).map((entry) => entry.name) };
+    const names = new Set<string>();
+    for (const relative of ['.agents/skills', '.skills']) {
+      const { target } = await this.safePath(workspaceId, relative, true);
+      for (const entry of await fs.readdir(target, { withFileTypes: true }).catch(() => [])) {
+        if (entry.isDirectory() && skillNamePattern.test(entry.name)) names.add(entry.name);
+      }
+    }
+    return { workspaceId, skills: [...names].sort(), catalogCount: (await this.catalogEntries()).length };
   }
 
   async skillRead(workspaceId: string, name: string): Promise<Record<string, unknown>> {
     if (!skillNamePattern.test(name)) throw new AppError(400, 'INVALID_SKILL_NAME', 'Nome de skill inválido.');
-    return this.readFile(workspaceId, `.skills/${name}/SKILL.md`);
+    const relative = await this.installedSkillPath(workspaceId, name);
+    return this.readFile(workspaceId, `${relative}/SKILL.md`);
   }
 
   async skillResources(workspaceId: string, name: string): Promise<Record<string, unknown>> {
     if (!skillNamePattern.test(name)) throw new AppError(400, 'INVALID_SKILL_NAME', 'Nome de skill inválido.');
-    return this.listFiles(workspaceId, `.skills/${name}`, true);
+    return this.listFiles(workspaceId, await this.installedSkillPath(workspaceId, name), true);
   }
 
   async skillInstall(workspaceId: string, name: string, instructions: string, resources: Record<string, string>): Promise<Record<string, unknown>> {
     if (!skillNamePattern.test(name)) throw new AppError(400, 'INVALID_SKILL_NAME', 'Use letras minúsculas, números, hífen ou sublinhado no nome.');
     if (Buffer.byteLength(instructions) > 100_000) throw new AppError(413, 'SKILL_TOO_LARGE', 'Instruções da skill maiores que 100 KB.');
-    await this.writeFile(workspaceId, `.skills/${name}/SKILL.md`, instructions, false);
+    await this.writeFile(workspaceId, `.agents/skills/${name}/SKILL.md`, instructions, false);
     for (const [resourcePath, content] of Object.entries(resources)) {
-      await this.writeFile(workspaceId, `.skills/${name}/resources/${resourcePath}`, content, false);
+      await this.writeFile(workspaceId, `.agents/skills/${name}/resources/${resourcePath}`, content, false);
     }
     return { workspaceId, name, installed: true, resourceCount: Object.keys(resources).length };
+  }
+
+  async skillCatalog(): Promise<Record<string, unknown>> {
+    const skills = await this.catalogEntries();
+    return { count: skills.length, skills };
+  }
+
+  async installCatalogSkills(
+    workspaceId: string,
+    requestedNames: string[] = [],
+    overwrite = false
+  ): Promise<{ workspaceId: string; installed: string[]; skipped: string[] }> {
+    const root = await this.workspaceRoot(workspaceId);
+    const catalog = await this.catalogEntries();
+    const available = new Map(catalog.map((entry) => [entry.name, entry]));
+    const names = requestedNames.length ? [...new Set(requestedNames)] : [...available.keys()];
+    const installed: string[] = [];
+    const skipped: string[] = [];
+    for (const name of names) {
+      if (!skillNamePattern.test(name)) throw new AppError(400, 'INVALID_SKILL_NAME', `Nome de skill inválido: ${name}.`);
+      const entry = available.get(name);
+      if (!entry) throw new AppError(404, 'SKILL_NOT_IN_CATALOG', `Skill não encontrada no catálogo: ${name}.`);
+      const source = path.join(this.skillCatalogRoot, name);
+      const destination = path.join(root, '.agents', 'skills', name);
+      const existing = await fs.lstat(destination).catch(() => null);
+      if (existing && !overwrite) {
+        skipped.push(name);
+        continue;
+      }
+      const temporary = `${destination}.${crypto.randomUUID()}.tmp`;
+      await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+      await this.copySkillTree(source, temporary);
+      if (existing) {
+        const backup = `${destination}.${crypto.randomUUID()}.bak`;
+        await fs.rename(destination, backup);
+        try {
+          await fs.rename(temporary, destination);
+          await fs.rm(backup, { recursive: true, force: true });
+        } catch (error) {
+          await fs.rm(temporary, { recursive: true, force: true }).catch(() => undefined);
+          await fs.rename(backup, destination).catch(() => undefined);
+          throw error;
+        }
+      } else {
+        await fs.rename(temporary, destination);
+      }
+      installed.push(name);
+    }
+    return { workspaceId, installed, skipped };
+  }
+
+  async skillRemove(workspaceId: string, name: string): Promise<Record<string, unknown>> {
+    if (!skillNamePattern.test(name)) throw new AppError(400, 'INVALID_SKILL_NAME', 'Nome de skill inválido.');
+    const root = await this.workspaceRoot(workspaceId);
+    const relative = await this.installedSkillPath(workspaceId, name);
+    const source = path.join(root, relative);
+    const destination = path.join(root, '.trash', 'skills', `${name}-${Date.now()}`);
+    await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+    await fs.rename(source, destination);
+    return { workspaceId, name, removed: true, recoverable: true };
+  }
+
+  private async installedSkillPath(workspaceId: string, name: string): Promise<string> {
+    for (const relative of [`.agents/skills/${name}`, `.skills/${name}`]) {
+      const { target } = await this.safePath(workspaceId, relative, true);
+      const stat = await fs.lstat(target).catch(() => null);
+      if (stat?.isDirectory() && !stat.isSymbolicLink()) return relative;
+    }
+    throw new AppError(404, 'SKILL_NOT_FOUND', `Skill não instalada: ${name}.`);
+  }
+
+  private async catalogEntries(): Promise<Array<{ name: string; description: string; source: 'anthropic' | 'numia' }>> {
+    const entries: Array<{ name: string; description: string; source: 'anthropic' | 'numia' }> = [];
+    for (const entry of await fs.readdir(this.skillCatalogRoot, { withFileTypes: true }).catch(() => [])) {
+      if (!entry.isDirectory() || !skillNamePattern.test(entry.name)) continue;
+      const skillFile = path.join(this.skillCatalogRoot, entry.name, 'SKILL.md');
+      const stat = await fs.lstat(skillFile).catch(() => null);
+      if (!stat?.isFile() || stat.isSymbolicLink() || stat.size > 100_000) continue;
+      const content = await fs.readFile(skillFile, 'utf8');
+      entries.push({
+        name: entry.name,
+        description: skillDescription(content),
+        source: await fs.stat(path.join(this.skillCatalogRoot, entry.name, 'LICENSE.txt')).then(() => 'anthropic' as const).catch(() => 'numia' as const)
+      });
+    }
+    return entries.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  private async copySkillTree(source: string, destination: string): Promise<void> {
+    const totals = { files: 0, bytes: 0 };
+    const walk = async (from: string, to: string, depth: number): Promise<void> => {
+      if (depth > 12) throw new AppError(413, 'SKILL_TOO_LARGE', 'Skill excede a profundidade permitida.');
+      await fs.mkdir(to, { recursive: true, mode: 0o700 });
+      for (const entry of await fs.readdir(from, { withFileTypes: true })) {
+        const sourcePath = path.join(from, entry.name);
+        const destinationPath = path.join(to, entry.name);
+        if (entry.isSymbolicLink()) throw new AppError(400, 'SKILL_SYMLINK_NOT_ALLOWED', 'Skills com links simbólicos não são permitidas.');
+        if (entry.isDirectory()) {
+          await walk(sourcePath, destinationPath, depth + 1);
+        } else if (entry.isFile()) {
+          const stat = await fs.stat(sourcePath);
+          totals.files += 1;
+          totals.bytes += stat.size;
+          if (totals.files > 500 || stat.size > 5 * 1024 * 1024 || totals.bytes > 20 * 1024 * 1024) {
+            throw new AppError(413, 'SKILL_TOO_LARGE', 'Skill excede os limites seguros do catálogo.');
+          }
+          await fs.copyFile(sourcePath, destinationPath);
+          await fs.chmod(destinationPath, 0o600);
+        }
+      }
+    };
+    try {
+      await walk(source, destination, 0);
+      const skillFile = path.join(destination, 'SKILL.md');
+      const skillStat = await fs.stat(skillFile).catch(() => null);
+      if (!skillStat?.isFile()) throw new AppError(400, 'INVALID_SKILL', 'Skill sem SKILL.md.');
+    } catch (error) {
+      await fs.rm(destination, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   private publicBaseUrl(): string {

@@ -19,6 +19,7 @@ describe('Remote MCP endpoint', () => {
       NODE_ENV: 'test', NUMIA_SERVER_TOKEN: token, DATA_DIR: dir,
       PUBLIC_BASE_URL: 'https://example.test', MCP_ENABLED: 'true',
       MCP_WORKSPACES_DIR: path.join(dir, 'workspaces'), MCP_WORKER_TOKEN: 'b'.repeat(64),
+      SKILL_CATALOG_DIR: path.join(dir, 'catalog'), MCP_AUTO_INSTALL_SKILLS: 'false',
       ALLOWED_MODELS: 'gemini-3.7-flash-low', DEFAULT_MODEL: 'gemini-3.7-flash-low'
     }));
 
@@ -74,8 +75,9 @@ describe('Remote MCP endpoint', () => {
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
         'artifact_list', 'artifact_publish', 'file_edit', 'file_list', 'file_read', 'file_write',
-        'git_clone', 'goal_run', 'shell_execute', 'skill_install', 'skill_list', 'skill_read',
-        'skill_resources', 'workspace_create', 'workspace_delete', 'workspace_info'
+        'git_clone', 'goal_run', 'shell_execute', 'skill_catalog', 'skill_install', 'skill_install_catalog',
+        'skill_list', 'skill_read', 'skill_remove', 'skill_resources', 'workspace_create',
+        'workspace_delete', 'workspace_info'
       ]);
       const created = await client.callTool({ name: 'workspace_create', arguments: { name: 'Integração' } });
       const workspaceId = String((created.structuredContent as Record<string, unknown>).id);

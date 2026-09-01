@@ -2,6 +2,7 @@ import path from 'node:path';
 import { z } from 'zod';
 
 const bool = z.string().optional().transform((v) => v === 'true');
+const boolWithDefault = (fallback: boolean) => z.string().optional().transform((v) => v === undefined ? fallback : v === 'true');
 const positiveInt = (fallback: number) => z.coerce.number().int().positive().default(fallback);
 
 const envSchema = z.object({
@@ -20,6 +21,8 @@ const envSchema = z.object({
   MCP_WORKER_URL: z.string().url().default('http://workspace-worker:3010'),
   MCP_WORKER_TOKEN: z.string().default(''),
   MCP_COMMAND_TIMEOUT_MS: positiveInt(60_000),
+  SKILL_CATALOG_DIR: z.string().default(path.resolve('skill-catalog')),
+  MCP_AUTO_INSTALL_SKILLS: boolWithDefault(true),
   MAX_GEMINI_PROCESSES: positiveInt(2),
   AGY_TIMEOUT_MS: positiveInt(300_000),
   AGY_COMMAND: z.string().default('agy'),
@@ -54,6 +57,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     visionModel,
     allowedOrigins: parsed.ALLOWED_ORIGINS.split(',').map((v) => v.trim()).filter(Boolean),
     dataDir: path.resolve(parsed.DATA_DIR),
+    skillCatalogDir: path.resolve(parsed.SKILL_CATALOG_DIR),
     mcpWorkspacesDir: path.resolve(parsed.MCP_WORKSPACES_DIR || path.join(parsed.DATA_DIR, 'mcp-workspaces'))
   };
 }

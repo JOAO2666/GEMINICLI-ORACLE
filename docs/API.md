@@ -236,6 +236,19 @@ curl -X DELETE -H "Authorization: Bearer $NUMIA_SERVER_TOKEN" \
   https://SEU_DOMINIO/api/conversations/CONVERSATION_ID/generation
 ```
 
+## Skills no servidor MCP
+
+O endpoint `/mcp` oferece `skill_catalog`, `skill_install_catalog`, `skill_list`, `skill_read`, `skill_resources`, `skill_install` e `skill_remove`. Por padrão, cada workspace recebe todas as skills compatíveis do catálogo em `.agents/skills/`.
+
+O catálogo possui 18 skills: 13 cópias não modificadas das skills oficiais Apache 2.0 da Anthropic e cinco implementações independentes para `anki-apkg`, `document-pdf`, `document-docx`, `document-xlsx` e `document-pptx`. O servidor não inclui skills cuja licença restringe o uso aos serviços Anthropic.
+
+As skills orientam o agente interno de `goal_run`; elas não se tornam ferramentas OpenAI nem recebem acesso às credenciais do servidor. Instruções específicas do Claude são adaptadas semanticamente para as ferramentas locais, e o agente é proibido de instalar ou chamar APIs pagas.
+
+Variáveis relacionadas:
+
+- `SKILL_CATALOG_DIR`: diretório somente leitura do catálogo empacotado.
+- `MCP_AUTO_INSTALL_SKILLS`: com `true`, instala skills ausentes em workspaces novos e existentes sem sobrescrever personalizações.
+
 ## Códigos de erro relevantes
 
 - `UNAUTHORIZED` — token do NumIA inválido

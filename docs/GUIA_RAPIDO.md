@@ -8,7 +8,7 @@ Este projeto transforma o modo headless do Antigravity CLI (`agy`) em uma API pr
 
 - API de texto e imagem para o NumIA;
 - rotas compatíveis com OpenAI em `/v1/models` e `/v1/chat/completions`;
-- servidor MCP em `/mcp` com workspaces, arquivos, Git, terminal isolado e publicação de artefatos;
+- servidor MCP em `/mcp` com workspaces, arquivos, Git, terminal isolado, catálogo de 18 skills e publicação de artefatos;
 - HTTPS automático com Caddy;
 - autenticação Google persistente em um volume separado.
 

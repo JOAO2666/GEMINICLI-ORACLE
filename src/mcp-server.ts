@@ -124,10 +124,17 @@ export function createWorkspaceMcpEndpoint(workspaces: McpWorkspaceService, oner
 
     server.registerTool('skill_list', {
       title: 'Listar skills',
-      description: 'Lista as skills instaladas no workspace.',
+      description: 'Lista as skills instaladas no workspace e informa o tamanho do catálogo disponível.',
       inputSchema: z.object({ workspace_id: z.string().uuid() }),
       annotations: readOnly
     }, ({ workspace_id }) => guarded(() => workspaces.skillList(workspace_id)));
+
+    server.registerTool('skill_catalog', {
+      title: 'Catálogo de skills',
+      description: 'Lista as skills oficiais e gratuitas disponíveis para instalação, com descrição e origem.',
+      inputSchema: z.object({}),
+      annotations: readOnly
+    }, () => guarded(() => workspaces.skillCatalog()));
 
     server.registerTool('skill_read', {
       title: 'Ler skill',
@@ -145,7 +152,7 @@ export function createWorkspaceMcpEndpoint(workspaces: McpWorkspaceService, oner
 
     server.registerTool('skill_install', {
       title: 'Instalar skill',
-      description: 'Instala instruções e recursos fornecidos pelo usuário em uma skill privada do workspace.',
+      description: 'Instala instruções e recursos fornecidos pelo usuário em uma skill privada compatível com Agent Skills.',
       inputSchema: z.object({
         workspace_id: z.string().uuid(), name: z.string().min(1).max(64),
         instructions: z.string().min(1).max(100_000),
@@ -154,6 +161,25 @@ export function createWorkspaceMcpEndpoint(workspaces: McpWorkspaceService, oner
       annotations: localWrite
     }, ({ workspace_id, name, instructions, resources }) =>
       guarded(() => workspaces.skillInstall(workspace_id, name, instructions, resources)));
+
+    server.registerTool('skill_install_catalog', {
+      title: 'Instalar skills do catálogo',
+      description: 'Instala no workspace uma seleção do catálogo gratuito. Uma lista vazia instala todas. Não usa APIs pagas.',
+      inputSchema: z.object({
+        workspace_id: z.string().uuid(),
+        names: z.array(z.string().min(1).max(64)).max(64).default([]),
+        overwrite: z.boolean().default(false)
+      }),
+      annotations: localWrite
+    }, ({ workspace_id, names, overwrite }) =>
+      guarded(() => workspaces.installCatalogSkills(workspace_id, names, overwrite)));
+
+    server.registerTool('skill_remove', {
+      title: 'Remover skill',
+      description: 'Move uma skill instalada para a lixeira recuperável do workspace.',
+      inputSchema: z.object({ workspace_id: z.string().uuid(), name: z.string().min(1).max(64) }),
+      annotations: destructive
+    }, ({ workspace_id, name }) => guarded(() => workspaces.skillRemove(workspace_id, name)));
 
     server.registerTool('artifact_list', {
       title: 'Listar artefatos',

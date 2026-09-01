@@ -131,7 +131,16 @@ Veja o [guia rápido em português](docs/GUIA_RAPIDO.md), a [documentação da A
 
 Com `MCP_ENABLED=true`, o mesmo domínio também publica um endpoint Streamable HTTP em `https://SEU-DOMINIO/mcp`. Ele aceita a chave privada do NumIA como Bearer e também oferece OAuth 2.0 com cadastro dinâmico, PKCE e tela de autorização para clientes como Gemini Spark.
 
-As 16 ferramentas disponíveis são `goal_run`, `skill_list`, `skill_read`, `skill_resources`, `skill_install`, `workspace_create`, `workspace_delete`, `workspace_info`, `shell_execute`, `file_list`, `file_read`, `file_write`, `file_edit`, `git_clone`, `artifact_list` e `artifact_publish`.
+As 19 ferramentas disponíveis são `goal_run`, `skill_catalog`, `skill_list`, `skill_read`, `skill_resources`, `skill_install`, `skill_install_catalog`, `skill_remove`, `workspace_create`, `workspace_delete`, `workspace_info`, `shell_execute`, `file_list`, `file_read`, `file_write`, `file_edit`, `git_clone`, `artifact_list` e `artifact_publish`.
+
+O catálogo incluído instala automaticamente 18 skills em cada workspace: 13 skills oficiais da Anthropic sob Apache 2.0 e cinco skills independentes do NumIA para Anki/APKG, PDF, DOCX, XLSX e PPTX. Skills oficiais com licença restrita ao uso de serviços Anthropic não são redistribuídas. A origem, o commit auditado e todas as exclusões ficam documentados em [`skill-catalog/CATALOG.json`](skill-catalog/CATALOG.json).
+
+- `skill_catalog` mostra o catálogo e a origem de cada skill.
+- `skill_install_catalog` instala uma seleção ou todas as skills e permite atualização explícita com `overwrite=true`.
+- `skill_remove` move uma skill para a lixeira recuperável.
+- Skills personalizadas continuam disponíveis por `skill_install`.
+- O caminho canônico é `.agents/skills/<nome>/SKILL.md`, compatível com Antigravity; o caminho legado `.skills` permanece legível.
+- `MCP_AUTO_INSTALL_SKILLS=true` instala o catálogo em workspaces novos e completa workspaces existentes na inicialização.
 
 - Arquivos e comandos ficam em workspaces dedicados no volume `mcp-workspaces`.
 - Comandos rodam em um serviço separado, sem o volume das credenciais Google e com limites de memória, processos, tempo e saída.
@@ -139,6 +148,7 @@ As 16 ferramentas disponíveis são `goal_run`, `skill_list`, `skill_read`, `ski
 - `git_clone` aceita somente repositórios públicos HTTPS do GitHub.
 - Artefatos publicados recebem URLs HTTPS com identificadores aleatórios.
 - Clientes compatíveis devem solicitar confirmação do usuário antes das ferramentas marcadas como escrita ou destrutivas.
+- Skills adaptadas nunca autorizam APIs Anthropic/OpenAI nem outros serviços pagos; `goal_run` recebe uma regra explícita para usar somente o login Google já configurado e ferramentas locais gratuitas.
 
 Defina `MCP_WORKER_TOKEN` com outro valor aleatório de pelo menos 32 caracteres; ele deve ser diferente de `NUMIA_SERVER_TOKEN` e nunca deve ser enviado ao aplicativo ou versionado.
 
