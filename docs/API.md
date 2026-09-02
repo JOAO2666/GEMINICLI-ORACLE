@@ -19,9 +19,8 @@ O servidor também aceita o formato OpenAI usado pelo aplicativo
 
 As variantes `/v1/models` e `/v1/chat/completions` também são aceitas. Texto e imagens
 locais em Data URL são suportados. URLs remotas de imagem são recusadas por segurança.
-Requisições do NumIA que contenham imagens são encaminhadas automaticamente ao modelo
-definido em `VISION_MODEL` (por padrão, `gemini-3.7-flash-low`), mesmo quando o botão de
-raciocínio estiver selecionado.
+Requisições com imagens usam o modelo selecionado no campo `model`. `VISION_MODEL`
+é opcional e, quando preenchido, força esse modelo somente para mensagens com imagens.
 
 ## OpenAI Tool Calling
 
@@ -134,9 +133,12 @@ curl https://SEU_DOMINIO/health
 curl -H "Authorization: Bearer $NUMIA_SERVER_TOKEN" https://SEU_DOMINIO/api/provider/status
 curl -H "Authorization: Bearer $NUMIA_SERVER_TOKEN" https://SEU_DOMINIO/api/gemini/status
 curl -H "Authorization: Bearer $NUMIA_SERVER_TOKEN" https://SEU_DOMINIO/api/models
+curl -X POST -H "Authorization: Bearer $NUMIA_SERVER_TOKEN" https://SEU_DOMINIO/api/models/refresh
+curl -H "Authorization: Bearer $NUMIA_SERVER_TOKEN" https://SEU_DOMINIO/api/usage
+curl -H "Authorization: Bearer $NUMIA_SERVER_TOKEN" https://SEU_DOMINIO/api/provider/maintenance
 ```
 
-`authenticated: true` indica que há credencial OAuth em cache; a validade efetiva é confirmada ao fazer uma geração.
+`authenticated: true` indica que há credencial OAuth em cache; a validade efetiva é confirmada ao fazer uma geração. Todos os slugs retornados em `/api/models`, inclusive Claude, podem ser usados no campo `model` da API e no argumento `model` de `goal_run` no MCP.
 
 ## Conversas
 

@@ -57,7 +57,8 @@ describe('MCP workspace isolation', () => {
     expect(lastPrompt).toContain(path.join(config.mcpWorkspacesDir, id));
     expect(lastPrompt).toContain('Nunca use o diretório scratch');
     expect(lastPrompt).toContain('.agents');
-    expect(lastPrompt).toContain('Nunca instale nem chame Claude');
+    expect(lastPrompt).toContain('Não chame APIs externas nem use chaves próprias');
+    expect(lastPrompt).toContain('modelo selecionado e autenticado pelo Antigravity CLI');
     expect(await workspaces.skillRemove(id, 'test-skill')).toMatchObject({ removed: true, recoverable: true });
     expect(await workspaces.installCatalogSkills(id)).toMatchObject({ installed: ['test-skill'] });
     await expect(workspaces.readFile(id, '../fora.txt')).rejects.toThrow('fora do workspace');

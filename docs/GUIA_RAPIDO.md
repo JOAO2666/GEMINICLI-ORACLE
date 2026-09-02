@@ -44,7 +44,7 @@ Edite `.env` e use os dois valores aleatórios em:
 - `NUMIA_SERVER_TOKEN`: chave privada usada pelo NumIA e pela tela de autorização MCP;
 - `MCP_WORKER_TOKEN`: chave interna diferente, nunca enviada a aplicativos;
 - `DOMAIN` e `PUBLIC_BASE_URL`: domínio HTTPS do servidor;
-- `ALLOWED_MODELS`: modelos que o proprietário deseja liberar.
+- `ALLOWED_MODELS`: deixe vazio para liberar automaticamente todos os modelos do CLI, ou informe uma lista para restringir.
 
 Nunca envie essas chaves em conversas, prints ou no GitHub. O arquivo `.env` já está excluído do Git.
 
@@ -91,7 +91,7 @@ Na tela de chave de API do NumIA:
 2. Informe `NUMIA_SERVER_TOKEN` como chave.
 3. Avance e escolha um dos modelos retornados pelo servidor.
 
-O envio de imagens usa upload separado e o modelo configurado em `VISION_MODEL`. Para fotos com questões, use uma imagem legível e um modelo visual disponível. O botão de raciocínio pode ficar ativado para problemas complexos; ele não corrige uma imagem ausente ou ilegível e pode aumentar o tempo de resposta.
+O envio de imagens usa o modelo escolhido na própria requisição. Defina `VISION_MODEL` somente se quiser forçar outro modelo para imagens.
 
 ## Conectar ao Gemini Spark
 
@@ -117,16 +117,15 @@ Liste os modelos liberados para a conta:
 docker compose --profile login run --rm antigravity-login agy models
 ```
 
-Os nomes podem mudar conforme o Google e a conta. Exemplos documentados pelo CLI incluem famílias Gemini 3.1 Pro, 3.6 Flash e 3.7 Flash, com níveis como `high`, `medium` ou `low` quando oferecidos.
+Os nomes mudam conforme o Google e a conta. O servidor executa a descoberta na inicialização e a cada 15 minutos. Atualmente o CLI oferece Gemini 3.8 Flash, versões Gemini anteriores, Claude Sonnet/Opus e GPT-OSS. Confira ou force a atualização:
 
-Um modelo novo do Google **não aparece automaticamente na API deste projeto**. A proteção `ALLOWED_MODELS` exige liberação consciente:
+```bash
+curl -H "Authorization: Bearer $NUMIA_SERVER_TOKEN" https://SEU_DOMINIO/api/models
+curl -X POST -H "Authorization: Bearer $NUMIA_SERVER_TOKEN" https://SEU_DOMINIO/api/models/refresh
+curl -H "Authorization: Bearer $NUMIA_SERVER_TOKEN" https://SEU_DOMINIO/api/usage
+```
 
-1. confirme o slug exato em `agy models`;
-2. adicione o slug a `ALLOWED_MODELS` no `.env`;
-3. recrie os serviços com `docker compose up -d --force-recreate`;
-4. confira `GET /api/models` no NumIA.
-
-Isso impede que o servidor comece a usar silenciosamente um modelo novo, mais restrito ou incompatível.
+Deixe `ALLOWED_MODELS` vazio para atualização automática. Preencha-o apenas se quiser impedir modelos não aprovados.
 
 ## Sem risco de cobrança
 

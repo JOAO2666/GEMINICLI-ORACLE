@@ -33,10 +33,22 @@ export interface ProviderStatus {
   message?: string;
 }
 
+export interface ProviderMaintenance {
+  installedVersion?: string;
+  updated?: boolean;
+  skipped?: boolean;
+  message?: string;
+  modelsRefreshedAt?: string;
+}
+
 export interface AIProvider {
   sendMessage(request: ProviderRequest): Promise<string>;
   streamMessage(request: ProviderRequest): AsyncGenerator<ProviderEvent>;
   listModels(): Promise<string[]>;
+  refreshModels?(force?: boolean): Promise<string[]>;
+  getUsage?(): Promise<unknown>;
+  updateCLI?(): Promise<ProviderMaintenance>;
+  maintenanceStatus?(): ProviderMaintenance;
   checkAuthentication(): Promise<ProviderStatus>;
   cancel(conversationId: string): boolean;
   supportsFiles(): boolean;

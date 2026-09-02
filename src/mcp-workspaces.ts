@@ -236,7 +236,14 @@ export class McpWorkspaceService {
 
   async goalRun(workspaceId: string, goal: string, model?: string, effort: 'low' | 'medium' | 'high' = 'high'): Promise<Record<string, unknown>> {
     const root = await this.workspaceRoot(workspaceId);
-    const selectedModel = model && this.config.allowedModels.includes(model) ? model : this.config.DEFAULT_MODEL;
+    const discoveredModels = await this.provider.listModels();
+    const availableModels = discoveredModels.length > 0
+      ? discoveredModels
+      : (this.config.allowedModels.length > 0 ? this.config.allowedModels : [this.config.DEFAULT_MODEL]);
+    const selectedModel = model ?? (availableModels.includes(this.config.DEFAULT_MODEL) ? this.config.DEFAULT_MODEL : availableModels[0]);
+    if (!selectedModel || !availableModels.includes(selectedModel)) {
+      throw new AppError(400, 'MODEL_NOT_AVAILABLE', 'O modelo solicitado não está disponível no Antigravity CLI.');
+    }
     const prompt = [
       'Execute o objetivo solicitado dentro do workspace atual.',
       `O único workspace autorizado é exatamente: ${root}`,
@@ -245,7 +252,7 @@ export class McpWorkspaceService {
       'Você pode criar e editar arquivos, executar verificações e corrigir problemas até concluir o objetivo.',
       `As skills disponíveis ficam em ${path.join(root, '.agents', 'skills')}. Consulte o SKILL.md da skill relevante antes de agir e use seus recursos somente quando forem úteis ao objetivo.`,
       'Algumas skills foram originalmente escritas para Claude. Nesse conteúdo, interprete "Claude" como o agente atual e adapte Read/Write/Bash/create_file às ferramentas locais disponíveis.',
-      'Nunca instale nem chame Claude, Anthropic API, OpenAI API ou qualquer serviço pago. Use somente o modelo já autenticado no servidor e ferramentas locais gratuitas.',
+      'Não chame APIs externas nem use chaves próprias. Use somente o modelo selecionado e autenticado pelo Antigravity CLI do servidor.',
       '',
       `OBJETIVO:\n${goal}`
     ].join('\n');

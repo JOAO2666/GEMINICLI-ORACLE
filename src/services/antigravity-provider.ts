@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { AppError, publicProviderError } from '../errors.js';
-import type { AIProvider, ProviderEvent, ProviderRequest, ProviderStatus } from '../types.js';
+import type { AIProvider, ProviderEvent, ProviderMaintenance, ProviderRequest, ProviderStatus } from '../types.js';
 import type { Config } from '../config.js';
 import { Semaphore } from './queue.js';
 import { parseJsonLine } from './stream-parser.js';
@@ -39,6 +39,33 @@ function objectValue(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? value as Record<string, unknown> : {};
 }
 
+export function parseAntigravityModels(stdout: string): string[] {
+  return [...new Set(stdout.split(/\r?\n/)
+    .map((line) => line.trim().split(/\s+/)[0])
+    .filter((model): model is string => Boolean(model && /^[a-z0-9][a-z0-9._-]{0,99}$/.test(model))))];
+}
+
+export function parseAntigravityUsage(stdout: string): Record<string, unknown> {
+  const payload = JSON.parse(stdout) as Record<string, unknown>;
+  const data = objectValue(objectValue(payload.command).data);
+  const groups = Array.isArray(data.groups) ? data.groups.map((rawGroup) => {
+    const group = objectValue(rawGroup);
+    const buckets = Array.isArray(group.buckets) ? group.buckets.map((rawBucket) => {
+      const bucket = objectValue(rawBucket);
+      const remaining = typeof bucket.remaining_fraction === 'number' ? bucket.remaining_fraction : undefined;
+      return {
+        id: bucket.id, name: bucket.name, window: bucket.window,
+        remainingFraction: remaining,
+        remainingPercent: remaining === undefined ? undefined : Math.round(remaining * 10_000) / 100,
+        usedPercent: remaining === undefined ? undefined : Math.round((1 - remaining) * 10_000) / 100,
+        resetTime: bucket.reset_time
+      };
+    }) : [];
+    return { name: group.name, description: group.description, buckets };
+  }) : [];
+  return { checkedAt: new Date().toISOString(), description: data.description, groups };
+}
+
 export function buildAntigravityArgs(request: ProviderRequest, timeoutMs: number): string[] {
   const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
   const args = [
@@ -58,6 +85,11 @@ export function buildAntigravityArgs(request: ProviderRequest, timeoutMs: number
 export class AntigravityCLIProvider implements AIProvider {
   private readonly semaphore: Semaphore;
   private readonly active = new Map<string, AbortController>();
+  private modelCache: string[] = [];
+  private modelsRefreshedAt = 0;
+  private modelRefreshPromise?: Promise<string[]>;
+  private updatePromise?: Promise<ProviderMaintenance>;
+  private lastMaintenance: ProviderMaintenance = {};
 
   constructor(private readonly config: Config) {
     this.semaphore = new Semaphore(config.MAX_GEMINI_PROCESSES);
@@ -66,10 +98,63 @@ export class AntigravityCLIProvider implements AIProvider {
   supportsFiles(): boolean { return true; }
 
   async listModels(): Promise<string[]> {
-    const result = await this.run(['models'], 20_000);
-    if (!result || result.code !== 0) return this.config.allowedModels;
-    const discovered = result.stdout.split(/\r?\n/).map((line) => line.split(/\s+/)[0]).filter((v): v is string => Boolean(v));
-    return discovered.filter((model) => this.config.allowedModels.includes(model));
+    return this.refreshModels(false);
+  }
+
+  async refreshModels(force = true): Promise<string[]> {
+    const fresh = Date.now() - this.modelsRefreshedAt < this.config.MODEL_REFRESH_INTERVAL_MS;
+    if (!force && fresh && this.modelCache.length > 0) return [...this.modelCache];
+    if (this.modelRefreshPromise) return this.modelRefreshPromise;
+    this.modelRefreshPromise = (async () => {
+      const result = await this.run(['models'], 20_000);
+      if (result?.code === 0) {
+        const unique = parseAntigravityModels(result.stdout);
+        this.modelCache = this.config.allowedModels.length > 0
+          ? unique.filter((model) => this.config.allowedModels.includes(model))
+          : unique;
+        this.modelsRefreshedAt = Date.now();
+        this.lastMaintenance.modelsRefreshedAt = new Date(this.modelsRefreshedAt).toISOString();
+      }
+      const fallback = this.config.allowedModels.length > 0 ? this.config.allowedModels : [this.config.DEFAULT_MODEL];
+      return [...(this.modelCache.length > 0 ? this.modelCache : fallback)];
+    })().finally(() => { this.modelRefreshPromise = undefined; });
+    return this.modelRefreshPromise;
+  }
+
+  async getUsage(): Promise<unknown> {
+    const result = await this.run(['-p', '/usage', '--output-format', 'json', '--print-timeout', '20s'], 30_000);
+    if (!result || result.code !== 0) {
+      throw new AppError(503, 'USAGE_UNAVAILABLE', 'Não foi possível consultar o uso do Antigravity CLI.');
+    }
+    return parseAntigravityUsage(result.stdout);
+  }
+
+  maintenanceStatus(): ProviderMaintenance {
+    return { ...this.lastMaintenance };
+  }
+
+  async updateCLI(): Promise<ProviderMaintenance> {
+    if (this.updatePromise) return this.updatePromise;
+    if (this.active.size > 0) {
+      return { ...this.lastMaintenance, skipped: true, message: 'Atualização adiada: há gerações em andamento.' };
+    }
+    this.updatePromise = (async () => {
+      const before = await this.run(['--version'], 10_000);
+      const update = await this.run(['update'], 120_000);
+      const after = await this.run(['--version'], 10_000);
+      const beforeVersion = before?.stdout.trim();
+      const installedVersion = after?.stdout.trim() || beforeVersion;
+      const status: ProviderMaintenance = {
+        installedVersion,
+        updated: Boolean(beforeVersion && installedVersion && beforeVersion !== installedVersion),
+        skipped: false,
+        message: update?.code === 0 ? 'Verificação de atualização concluída.' : 'Não foi possível atualizar o CLI; a versão instalada foi mantida.'
+      };
+      this.lastMaintenance = { ...this.lastMaintenance, ...status };
+      await this.refreshModels(true);
+      return { ...this.lastMaintenance };
+    })().finally(() => { this.updatePromise = undefined; });
+    return this.updatePromise;
   }
 
   async checkAuthentication(): Promise<ProviderStatus> {

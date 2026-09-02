@@ -52,6 +52,13 @@ export async function buildApp(config: Config, options: { provider?: AIProvider 
   const files = new FileService(config, db);
   const chats = new ChatService(config, db);
   const provider = options.provider ?? new AntigravityCLIProvider(config);
+  const validateAvailableModel = async (model?: string) => {
+    const selected = chats.validateModel(model);
+    if (!(await provider.listModels()).includes(selected)) {
+      throw new AppError(400, 'MODEL_NOT_AVAILABLE', 'O modelo solicitado não está disponível no Antigravity CLI.');
+    }
+    return selected;
+  };
   let mcpAuth: McpAuthStore | undefined;
   let mcpEndpoint: McpEndpoint | undefined;
   let mcpWorkspaces: McpWorkspaceService | undefined;
@@ -133,19 +140,34 @@ export async function buildApp(config: Config, options: { provider?: AIProvider 
   }
   app.get('/api/provider/status', async () => provider.checkAuthentication());
   app.get('/api/gemini/status', async () => provider.checkAuthentication());
-  app.get('/api/models', async () => ({ models: await provider.listModels(), discovery: 'agy models + allowlist' }));
+  app.get('/api/models', async () => ({
+    models: await provider.listModels(),
+    discovery: config.allowedModels.length > 0 ? 'agy models + allowlist opcional' : 'agy models (catálogo automático)'
+  }));
+  app.post('/api/models/refresh', async () => ({
+    models: provider.refreshModels ? await provider.refreshModels(true) : await provider.listModels(),
+    refreshedAt: new Date().toISOString()
+  }));
+  app.get('/api/usage', async () => {
+    if (!provider.getUsage) throw new AppError(501, 'USAGE_UNSUPPORTED', 'O provedor não oferece consulta de uso.');
+    return provider.getUsage();
+  });
+  app.get('/api/provider/maintenance', async () => provider.maintenanceStatus?.() ?? {});
+  app.post('/api/provider/update', async () => {
+    if (!provider.updateCLI) throw new AppError(501, 'UPDATE_UNSUPPORTED', 'O provedor não oferece atualização automática.');
+    return provider.updateCLI();
+  });
 
-  const listCompatibleModels = async () => openAIModelList(config.allowedModels);
+  const listCompatibleModels = async () => openAIModelList(await provider.listModels());
   app.get('/models', listCompatibleModels);
   app.get('/v1/models', listCompatibleModels);
 
   async function compatibleChat(body: unknown, request: FastifyRequest, reply: FastifyReply) {
     const prepared = await prepareOpenAIRequest(body, config);
     const requestedModel = chats.validateModel(prepared.input.model);
-    // Antigravity currently exposes vision reliably only through the low Flash profile.
-    // NumIA may send the selected chat/thinking model with an image, so route image turns
-    // through the configured vision model while leaving text turns untouched.
-    const model = prepared.imageCount > 0 ? config.visionModel : requestedModel;
+    const model = prepared.imageCount > 0 && config.VISION_MODEL
+      ? await validateAvailableModel(config.visionModel)
+      : await validateAvailableModel(requestedModel);
     const id = `chatcmpl-${prepared.conversationId}`;
     const created = Math.floor(Date.now() / 1000);
 
@@ -250,7 +272,7 @@ export async function buildApp(config: Config, options: { provider?: AIProvider 
 
   app.post('/api/conversations', async (request, reply) => {
     const body = createConversationSchema.parse(request.body);
-    const model = chats.validateModel(body.model);
+    const model = await validateAvailableModel(body.model);
     return reply.code(201).send(db.createConversation(model));
   });
   app.get('/api/conversations', async () => db.listConversations());
@@ -284,7 +306,7 @@ export async function buildApp(config: Config, options: { provider?: AIProvider 
 
   async function execute(body: unknown, signal?: AbortSignal) {
     const input = chatSchema.parse(body);
-    const model = chats.validateModel(input.model ?? db.getConversation(input.conversationId).model);
+    const model = await validateAvailableModel(input.model ?? db.getConversation(input.conversationId).model);
     const turn = chats.createUserTurn(input.conversationId, input.message, model, input.attachmentIds);
     const workingDirectory = files.conversationDirectory(input.conversationId);
     await fs.mkdir(workingDirectory, { recursive: true, mode: 0o700 });
@@ -295,7 +317,7 @@ export async function buildApp(config: Config, options: { provider?: AIProvider 
 
   async function stream(body: unknown, request: FastifyRequest, reply: FastifyReply) {
     const input = chatSchema.parse(body);
-    const model = chats.validateModel(input.model ?? db.getConversation(input.conversationId).model);
+    const model = await validateAvailableModel(input.model ?? db.getConversation(input.conversationId).model);
     const turn = chats.createUserTurn(input.conversationId, input.message, model, input.attachmentIds);
     const workingDirectory = files.conversationDirectory(input.conversationId);
     await fs.mkdir(workingDirectory, { recursive: true, mode: 0o700 });
@@ -342,8 +364,24 @@ export async function buildApp(config: Config, options: { provider?: AIProvider 
     if (count) app.log.info({ count }, 'expired attachments removed');
   }).catch((error) => app.log.error({ err: error }, 'attachment cleanup failed')), 60 * 60 * 1000);
   cleanup.unref();
+  const modelRefresh = setInterval(() => {
+    void provider.refreshModels?.(true).catch((error) => app.log.warn({ err: error }, 'model refresh failed'));
+  }, config.MODEL_REFRESH_INTERVAL_MS);
+  modelRefresh.unref();
+  const cliUpdate = setInterval(() => {
+    if (config.AGY_AUTO_UPDATE) void provider.updateCLI?.().catch((error) => app.log.warn({ err: error }, 'CLI update failed'));
+  }, config.AGY_UPDATE_INTERVAL_MS);
+  cliUpdate.unref();
+  const startupMaintenance = setTimeout(() => {
+    const action = config.AGY_AUTO_UPDATE ? provider.updateCLI?.() : provider.refreshModels?.(true);
+    void action?.catch((error) => app.log.warn({ err: error }, 'startup maintenance failed'));
+  }, 5_000);
+  startupMaintenance.unref();
   app.addHook('onClose', async () => {
     clearInterval(cleanup);
+    clearInterval(modelRefresh);
+    clearInterval(cliUpdate);
+    clearTimeout(startupMaintenance);
     await mcpEndpoint?.handler.close();
     mcpAuth?.close();
     db.close();

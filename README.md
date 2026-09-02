@@ -57,8 +57,8 @@ Edite `.env`:
 
 - cole a saída aleatória em `NUMIA_SERVER_TOKEN`;
 - defina `DOMAIN` para o domínio público;
-- mantenha `DEFAULT_MODEL=gemini-3.1-pro-high` para usar o Gemini 3.1 Pro;
-- ajuste `ALLOWED_MODELS` somente para nomes que pretende permitir;
+- mantenha `DEFAULT_MODEL=gemini-3.8-flash-high` para usar o Gemini 3.8 Flash;
+- deixe `ALLOWED_MODELS` vazio para liberar automaticamente tudo que `agy models` oferecer (Gemini, Claude e GPT-OSS), ou preencha para restringir;
 - use `MAX_GEMINI_PROCESSES=1` em VM de 1 GB.
 
 ### Primeiro login Google sem navegador na VM
@@ -81,7 +81,7 @@ docker compose --profile login run --rm antigravity-login agy -p "Responda somen
 docker compose --profile login run --rm antigravity-login agy -p "Responda somente OK" --model gemini-3.1-pro-high --output-format stream-json --mode plan
 ```
 
-Se o modelo não estiver disponível, `agy` encerra com erro. Consulte os slugs liberados para a conta com `agy models` e ajuste a allowlist.
+Se o modelo não estiver disponível, `agy` encerra com erro. O servidor atualiza o catálogo automaticamente e também permite atualização imediata em `POST /api/models/refresh`.
 
 ### Recuperar uma sessão Google expirada
 
@@ -163,13 +163,19 @@ O `agy` oferece `--conversation` e o evento `init` fornece `conversation_id`. Es
 
 O custo é reenviar parte do histórico. `MAX_HISTORY_CHARS` limita esse contexto.
 
-## Modelos
+## Modelos, Claude e atualizações automáticas
 
-O CLI possui `agy models`. `GET /api/models` cruza a descoberta real com `ALLOWED_MODELS`, portanto apenas modelos simultaneamente disponíveis e autorizados são retornados. O servidor nunca aceita esse valor como argumento arbitrário. Um modelo novo não é habilitado automaticamente: confirme o slug com `agy models`, inclua-o em `ALLOWED_MODELS` e recrie o serviço. Essa allowlist evita que uma mudança externa selecione um modelo inesperado.
+O catálogo vem diretamente de `agy models`, é renovado a cada 15 minutos e aparece em `GET /api/models`, `GET /models` e `GET /v1/models`. Com `ALLOWED_MODELS=` vazio, novos modelos são liberados automaticamente sem alteração de código ou reinício. A lista atual inclui Gemini 3.8 Flash, Claude Sonnet 4.6, Claude Opus 4.6 Thinking e GPT-OSS, conforme a disponibilidade da conta.
+
+Cada chamada da API seleciona o modelo no campo `model`. No MCP, a ferramenta `goal_run` aceita o mesmo slug no argumento `model`. Para uma atualização imediata, use `POST /api/models/refresh`. Se quiser uma política restrita, preencha `ALLOWED_MODELS` com os slugs permitidos.
+
+`AGY_AUTO_UPDATE=true` verifica e aplica atualizações do CLI na inicialização e a cada seis horas, adiando a ação quando houver geração em andamento. Consulte `GET /api/provider/maintenance` ou force a verificação em `POST /api/provider/update`.
+
+`GET /api/usage` consulta o `/usage` oficial e devolve porcentagem usada/restante e horário de renovação para os grupos Gemini e Claude/GPT.
 
 ## Atualização segura do Antigravity CLI
 
-1. Consulte a release oficial e reconstrua a imagem; o Dockerfile usa o instalador oficial do `agy`.
+1. A atualização automática cobre o processo em execução; reconstrua a imagem periodicamente para persistir a versão após recriar o container.
 2. Execute os três testes de login/JSON acima em uma janela de manutenção.
 3. Reconstrua: `docker compose build --pull server antigravity-login`.
 4. Suba: `docker compose up -d`.

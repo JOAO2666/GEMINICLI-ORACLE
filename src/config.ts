@@ -13,9 +13,13 @@ const envSchema = z.object({
   PORT: positiveInt(3000),
   NUMIA_SERVER_TOKEN: z.string().min(32),
   ALLOWED_ORIGINS: z.string().default(''),
-  ALLOWED_MODELS: z.string().default('gemini-3.1-pro-high,gemini-3.1-pro-low,gemini-3.7-flash-high,gemini-3.7-flash-medium,gemini-3.7-flash-low,gemini-3.6-flash-high,gemini-3.6-flash-medium'),
-  DEFAULT_MODEL: z.string().default('gemini-3.1-pro-high'),
+  // Empty means every model currently returned by `agy models` is available.
+  ALLOWED_MODELS: z.string().default(''),
+  DEFAULT_MODEL: z.string().default('gemini-3.8-flash-high'),
   VISION_MODEL: z.string().default(''),
+  MODEL_REFRESH_INTERVAL_MS: positiveInt(15 * 60 * 1000),
+  AGY_AUTO_UPDATE: boolWithDefault(true),
+  AGY_UPDATE_INTERVAL_MS: positiveInt(6 * 60 * 60 * 1000),
   MCP_ENABLED: bool,
   MCP_WORKSPACES_DIR: z.string().default(''),
   MCP_WORKER_URL: z.string().url().default('http://workspace-worker:3010'),
@@ -42,13 +46,11 @@ export type Config = ReturnType<typeof loadConfig>;
 export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const parsed = envSchema.parse(env);
   const allowedModels = parsed.ALLOWED_MODELS.split(',').map((v) => v.trim()).filter(Boolean);
-  if (!allowedModels.includes(parsed.DEFAULT_MODEL)) {
+  if (allowedModels.length > 0 && !allowedModels.includes(parsed.DEFAULT_MODEL)) {
     throw new Error('DEFAULT_MODEL precisa estar em ALLOWED_MODELS');
   }
-  const visionModel = parsed.VISION_MODEL || (allowedModels.includes('gemini-3.7-flash-low')
-    ? 'gemini-3.7-flash-low'
-    : parsed.DEFAULT_MODEL);
-  if (!allowedModels.includes(visionModel)) {
+  const visionModel = parsed.VISION_MODEL || parsed.DEFAULT_MODEL;
+  if (allowedModels.length > 0 && !allowedModels.includes(visionModel)) {
     throw new Error('VISION_MODEL precisa estar em ALLOWED_MODELS');
   }
   return {

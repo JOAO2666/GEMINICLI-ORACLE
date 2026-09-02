@@ -8,7 +8,10 @@ export class ChatService {
 
   validateModel(model?: string): string {
     const selected = model ?? this.config.DEFAULT_MODEL;
-    if (!this.config.allowedModels.includes(selected)) {
+    if (!/^[a-z0-9][a-z0-9._-]{0,99}$/i.test(selected)) {
+      throw new AppError(400, 'INVALID_MODEL', 'Nome de modelo inválido.');
+    }
+    if (this.config.allowedModels.length > 0 && !this.config.allowedModels.includes(selected)) {
       throw new AppError(400, 'MODEL_NOT_ALLOWED', 'Modelo fora da lista permitida pelo servidor.');
     }
     return selected;
