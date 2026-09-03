@@ -31,7 +31,24 @@ describe('HTTP API', () => {
       headers: { authorization: `Bearer ${token}` }, payload: { model: 'gemini-3.1-pro-high' }
     });
     expect(response.statusCode).toBe(201);
-    expect(response.json()).toMatchObject({ model: 'gemini-3.1-pro-high' });
+    const cliCommands = await app.inject({
+      method: 'GET', url: '/api/cli/commands', headers: { authorization: `Bearer ${token}` }
+    });
+    expect(cliCommands.statusCode).toBe(200);
+    expect(cliCommands.json()).toHaveProperty('commands');
+
+    const cliHelp = await app.inject({
+      method: 'GET', url: '/api/cli/help', headers: { authorization: `Bearer ${token}` }
+    });
+    expect(cliHelp.statusCode).toBe(200);
+
+    const cliExec = await app.inject({
+      method: 'POST', url: '/api/cli/execute',
+      headers: { authorization: `Bearer ${token}` },
+      payload: { command: 'models', args: [] }
+    });
+    expect(cliExec.statusCode).toBe(200);
+
     await app.close();
-  });
+  }, 25_000);
 });

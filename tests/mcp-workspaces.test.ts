@@ -53,12 +53,26 @@ describe('MCP workspace isolation', () => {
     expect(await workspaces.listFiles(id)).toMatchObject({ entries: expect.arrayContaining([
       expect.objectContaining({ path: 'docs/resposta.txt', type: 'file' })
     ]) });
+
+    expect(await workspaces.getWorkspaceModel(id)).toBeUndefined();
+    await workspaces.setWorkspaceModel(id, 'gemini-3.7-flash-low');
+    expect(await workspaces.getWorkspaceModel(id)).toBe('gemini-3.7-flash-low');
+
     await workspaces.goalRun(id, 'Crie um arquivo.');
     expect(lastPrompt).toContain(path.join(config.mcpWorkspacesDir, id));
     expect(lastPrompt).toContain('Nunca use o diretório scratch');
     expect(lastPrompt).toContain('.agents');
     expect(lastPrompt).toContain('Não chame APIs externas nem use chaves próprias');
     expect(lastPrompt).toContain('modelo selecionado e autenticado pelo Antigravity CLI');
+
+    const lastExec = await workspaces.getLastExecution(id);
+    expect(lastExec).toMatchObject({ model: 'gemini-3.7-flash-low' });
+
+    const history = await workspaces.getCommandHistory(id);
+    expect(history.length).toBeGreaterThanOrEqual(2);
+    expect(history.some((h) => h.command.includes('model_set'))).toBe(true);
+    expect(history.some((h) => h.command.includes('goal_run'))).toBe(true);
+
     expect(await workspaces.skillRemove(id, 'test-skill')).toMatchObject({ removed: true, recoverable: true });
     expect(await workspaces.installCatalogSkills(id)).toMatchObject({ installed: ['test-skill'] });
     await expect(workspaces.readFile(id, '../fora.txt')).rejects.toThrow('fora do workspace');

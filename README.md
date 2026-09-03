@@ -129,9 +129,72 @@ Veja o [guia rápido em português](docs/GUIA_RAPIDO.md), a [documentação da A
 
 ## Servidor MCP remoto
 
-Com `MCP_ENABLED=true`, o mesmo domínio também publica um endpoint Streamable HTTP em `https://SEU-DOMINIO/mcp`. Ele aceita a chave privada do NumIA como Bearer e também oferece OAuth 2.0 com cadastro dinâmico, PKCE e tela de autorização para clientes como Gemini Spark.
+Com `MCP_ENABLED=true`, o mesmo domínio também publica um endpoint Streamable HTTP em `https://SEU-DOMINIO/mcp`. Ele aceita a chave privada do NumIA como Bearer e também oferece OAuth 2.0 com cadastro dinâmico, PKCE e tela de autorização para clientes como Gemini Spark, Claude Desktop, Cursor, Zed e qualquer cliente compatível com MCP.
 
-As 19 ferramentas disponíveis são `goal_run`, `skill_catalog`, `skill_list`, `skill_read`, `skill_resources`, `skill_install`, `skill_install_catalog`, `skill_remove`, `workspace_create`, `workspace_delete`, `workspace_info`, `shell_execute`, `file_list`, `file_read`, `file_write`, `file_edit`, `git_clone`, `artifact_list` e `artifact_publish`.
+O servidor oferece **30 ferramentas MCP**, combinando operações isoladas de workspace, catálogo completo de skills e uma **interface completa e segura para o Antigravity CLI (`agy`)**.
+
+## Comandos MCP e Interface do Antigravity CLI
+
+Todas as funcionalidades do Antigravity CLI podem ser controladas diretamente pelo chat de qualquer cliente MCP através de comandos intuitivos ou chamadas de ferramentas:
+
+### Comandos Rápidos de Chat (Slash Commands)
+
+| Comando | Descrição | Ferramenta MCP |
+| :--- | :--- | :--- |
+| `/models` | Lista todos os modelos disponíveis e destaca o modelo atual (`← atual`) | `models` |
+| `/model` | Exibe o modelo ativo do workspace ou do servidor | `model_current` |
+| `/model <modelo>` | Altera o modelo do workspace com suporte a aliases (`pro`, `flash`, `sonnet`, `opus`) | `model_set` |
+| `/usage` ou `/quota` | Exibe gráfico visual de barras de cota (`████████░░ 82%`) e percentuais | `usage` |
+| `/status` | Visão consolidada: saúde do servidor, autenticação do CLI, versão, cotas e workspace | `status` |
+| `/help` | Ajuda geral dos comandos disponíveis no Antigravity CLI | `cli_help` |
+| `/help <comando>` | Ajuda detalhada, sintaxe e flags de um subcomando específico (`agy <cmd> --help`) | `cli_help` |
+| `/update` | Atualização protegida do CLI (com trava contra gerações ativas) | `cli_update` |
+
+### Ferramentas MCP do Antigravity CLI
+
+1. `commands`: Catálogo completo de comandos de chat, ferramentas de workspace e comandos CLI detectados.
+2. `models`: Lista modelos de IA detectados dinamicamente via `agy models`, sem listas estáticas hardcoded.
+3. `model_current`: Informa o modelo em uso para o workspace selecionado ou padrão global.
+4. `model_set`: Define e persiste o modelo no `.workspace.json` do workspace, validando contra o catálogo real.
+5. `usage`: Consulta `/usage` oficial e formata barras visuais de progresso e horários de renovação.
+6. `usage_last`: Retorna métricas de tokens (prompt, conclusão, total) e duração da última execução de objetivo.
+7. `status`: Diagnóstico consolidado de conectividade, autenticação do `agy`, arquivos do workspace e catálogo.
+8. `cli_help`: Consulta ajuda geral ou específica do Antigravity CLI diretamente pelo executável do servidor.
+9. `cli_update`: Dispara a atualização do CLI de forma protegida, sincronizando o catálogo de modelos logo após.
+10. `cli_execute`: Executa subcomandos seguros do binário `agy` (`models`, `changelog`, `agent`, `mcp list`, `plugin list`).
+11. `cli_history`: Exibe o histórico higienizado de comandos e execuções realizadas no workspace.
+
+### Persistência de Modelo por Workspace e Fallback Inteligente
+
+- Cada workspace armazena seu modelo selecionado de forma isolada em `.workspace.json`.
+- A resolução de modelo em `goal_run` segue rigorosamente:
+  1. Modelo explícito fornecido na chamada da ferramenta.
+  2. Modelo persistido do workspace (`workspace.selectedModel`).
+  3. Modelo padrão global configurado (`DEFAULT_MODEL`).
+  4. Primeiro modelo disponível no catálogo do Antigravity CLI.
+- Se uma atualização do CLI remover um modelo previamente selecionado, o servidor realiza fallback automático seguro para o padrão e anexa uma nota informativa (`notice`) na resposta, sem quebrar o fluxo de trabalho.
+
+### Segurança e Execução Protegida
+
+- **Sem interpretador de shell**: Comandos do CLI são disparados diretamente via `spawn()` com argumentos em vetor; `sh -c`, `cmd.exe /c` e `bash -c` são estritamente proibidos.
+- **Validação rigorosa de argumentos**: Rejeição imediata de caracteres de encadeamento (`|`, `;`, `&`, `&&`, `||`), substituições (`$()`, \`\`, `${}`), injeções de variáveis de ambiente (`%VAR%`), caminhos absolutos arbitrários e path traversal (`..`).
+- **Redação ativa de saída**: Tokens Bearer, JWTs, chaves de API e caminhos confidenciais (`.gemini/auth.json`) são automaticamente redigidos antes do envio ao cliente.
+- **Proteção de concorrência**: Atualizações do CLI via `cli_update` são adiadas com segurança caso existam gerações ativas.
+
+### Endpoints REST da API CLI
+
+Além do protocolo MCP, o servidor expõe rotas HTTP protegidas por token Bearer:
+- `GET /api/cli/commands`: Lista comandos detectados e data da última sincronização.
+- `GET /api/cli/help`: Ajuda geral do CLI.
+- `GET /api/cli/help/:command`: Ajuda detalhada do subcomando solicitado.
+- `POST /api/cli/execute`: Execução segura de comandos autorizados.
+- `GET /api/cli/history/:workspaceId`: Consulta o histórico de execuções do workspace.
+
+---
+
+### Ferramentas de Workspace e Skills
+
+As 19 ferramentas de workspace existentes continuam totalmente operacionais: `workspace_create`, `workspace_delete`, `workspace_info`, `file_list`, `file_read`, `file_write`, `file_edit`, `shell_execute`, `git_clone`, `goal_run`, `skill_list`, `skill_catalog`, `skill_read`, `skill_resources`, `skill_install`, `skill_install_catalog`, `skill_remove`, `artifact_list` e `artifact_publish`.
 
 O catálogo incluído instala automaticamente 18 skills em cada workspace: 13 skills oficiais da Anthropic sob Apache 2.0 e cinco skills independentes do NumIA para Anki/APKG, PDF, DOCX, XLSX e PPTX. Skills oficiais com licença restrita ao uso de serviços Anthropic não são redistribuídas. A origem, o commit auditado e todas as exclusões ficam documentados em [`skill-catalog/CATALOG.json`](skill-catalog/CATALOG.json).
 

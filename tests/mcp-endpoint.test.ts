@@ -74,10 +74,12 @@ describe('Remote MCP endpoint', () => {
       await client.connect(transport);
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
-        'artifact_list', 'artifact_publish', 'file_edit', 'file_list', 'file_read', 'file_write',
-        'git_clone', 'goal_run', 'shell_execute', 'skill_catalog', 'skill_install', 'skill_install_catalog',
-        'skill_list', 'skill_read', 'skill_remove', 'skill_resources', 'workspace_create',
-        'workspace_delete', 'workspace_info'
+        'artifact_list', 'artifact_publish', 'cli_execute', 'cli_help', 'cli_history', 'cli_update',
+        'commands', 'file_edit', 'file_list', 'file_read', 'file_write', 'git_clone',
+        'goal_run', 'model_current', 'model_set', 'models', 'shell_execute',
+        'skill_catalog', 'skill_install', 'skill_install_catalog', 'skill_list',
+        'skill_read', 'skill_remove', 'skill_resources', 'status', 'usage',
+        'usage_last', 'workspace_create', 'workspace_delete', 'workspace_info'
       ]);
       const created = await client.callTool({ name: 'workspace_create', arguments: { name: 'Integração' } });
       const workspaceId = String((created.structuredContent as Record<string, unknown>).id);
@@ -86,6 +88,12 @@ describe('Remote MCP endpoint', () => {
       });
       const read = await client.callTool({ name: 'file_read', arguments: { workspace_id: workspaceId, path: 'teste.txt' } });
       expect(read.structuredContent).toMatchObject({ content: 'funcionou' });
+
+      const modelsCall = await client.callTool({ name: 'models', arguments: { workspace_id: workspaceId } });
+      expect(modelsCall.structuredContent).toMatchObject({ currentModel: 'gemini-3.7-flash-low' });
+
+      const commandsCall = await client.callTool({ name: 'commands', arguments: {} });
+      expect(commandsCall.structuredContent).toBeDefined();
     } finally {
       await client.close();
       await app.close();

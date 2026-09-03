@@ -34,15 +34,26 @@ export interface ProviderStatus {
 }
 
 export interface ProviderMaintenance {
+  previousVersion?: string;
   installedVersion?: string;
   updated?: boolean;
   skipped?: boolean;
   message?: string;
   modelsRefreshedAt?: string;
+  modelsUpdated?: boolean;
+}
+
+export interface ProviderResult {
+  text: string;
+  usage?: unknown;
+  structuredOutput?: unknown;
+  sessionId?: string;
+  durationSeconds?: number;
 }
 
 export interface AIProvider {
   sendMessage(request: ProviderRequest): Promise<string>;
+  sendMessageDetailed?(request: ProviderRequest): Promise<ProviderResult>;
   streamMessage(request: ProviderRequest): AsyncGenerator<ProviderEvent>;
   listModels(): Promise<string[]>;
   refreshModels?(force?: boolean): Promise<string[]>;
@@ -52,4 +63,5 @@ export interface AIProvider {
   checkAuthentication(): Promise<ProviderStatus>;
   cancel(conversationId: string): boolean;
   supportsFiles(): boolean;
+  onCatalogUpdate?(listener: () => void): void;
 }

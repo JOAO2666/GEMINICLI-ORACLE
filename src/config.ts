@@ -18,6 +18,7 @@ const envSchema = z.object({
   DEFAULT_MODEL: z.string().default('gemini-3.8-flash-high'),
   VISION_MODEL: z.string().default(''),
   MODEL_REFRESH_INTERVAL_MS: positiveInt(15 * 60 * 1000),
+  CLI_COMMAND_REFRESH_INTERVAL_MS: positiveInt(15 * 60 * 1000),
   AGY_AUTO_UPDATE: boolWithDefault(true),
   AGY_UPDATE_INTERVAL_MS: positiveInt(6 * 60 * 60 * 1000),
   MCP_ENABLED: bool,

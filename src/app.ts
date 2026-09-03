@@ -8,7 +8,7 @@ import formbody from '@fastify/formbody';
 import helmet from '@fastify/helmet';
 import multipart from '@fastify/multipart';
 import rateLimit from '@fastify/rate-limit';
-import { ZodError } from 'zod';
+import { z, ZodError } from 'zod';
 import type { Config } from './config.js';
 import { AppDatabase } from './database.js';
 import { AppError } from './errors.js';
@@ -16,6 +16,7 @@ import { chatSchema, conversationIdSchema, conversationMessageSchema, createConv
 import { ChatService } from './services/chat.js';
 import { FileService } from './services/files.js';
 import { AntigravityCLIProvider } from './services/antigravity-provider.js';
+import { AntigravityCommandRegistry } from './services/antigravity-command-registry.js';
 import type { AIProvider, ProviderEvent } from './types.js';
 import { openAIChunk, openAICompletion, openAIModelList, prepareOpenAIRequest } from './openai-compat.js';
 import { openAIToolCompletion, parseOpenAIToolDecision, type OpenAIToolDecision } from './openai-tools.js';
@@ -45,13 +46,20 @@ function publicError(error: unknown) {
   return { statusCode: 500, code: 'INTERNAL_ERROR', message: 'Erro interno do servidor.' };
 }
 
-export async function buildApp(config: Config, options: { provider?: AIProvider } = {}): Promise<FastifyInstance> {
+export async function buildApp(
+  config: Config,
+  options: { provider?: AIProvider; commandRegistry?: AntigravityCommandRegistry } = {}
+): Promise<FastifyInstance> {
   await fs.mkdir(config.dataDir, { recursive: true, mode: 0o700 });
   const app = Fastify({ logger: { redact: ['req.headers.authorization', 'request.headers.authorization'] }, trustProxy: config.TRUST_PROXY });
   const db = new AppDatabase(config.dataDir);
   const files = new FileService(config, db);
   const chats = new ChatService(config, db);
   const provider = options.provider ?? new AntigravityCLIProvider(config);
+  const commandRegistry = options.commandRegistry ?? new AntigravityCommandRegistry(config);
+  provider.onCatalogUpdate?.(() => {
+    commandRegistry.invalidate();
+  });
   const validateAvailableModel = async (model?: string) => {
     const selected = chats.validateModel(model);
     if (!(await provider.listModels()).includes(selected)) {
@@ -88,7 +96,10 @@ export async function buildApp(config: Config, options: { provider?: AIProvider 
     await mcpWorkspaces.initialize();
     await registerMcpOAuthRoutes(app, config, mcpAuth);
     mcpResource = mcpPublicUrls(config).resource;
-    mcpEndpoint = createWorkspaceMcpEndpoint(mcpWorkspaces, (error) => app.log.error({ err: error }, 'MCP error'));
+    mcpEndpoint = createWorkspaceMcpEndpoint(
+      mcpWorkspaces, provider, commandRegistry, config,
+      (error) => app.log.error({ err: error }, 'MCP error')
+    );
   }
 
   app.addHook('onRequest', async (request, reply) => {
@@ -156,6 +167,35 @@ export async function buildApp(config: Config, options: { provider?: AIProvider 
   app.post('/api/provider/update', async () => {
     if (!provider.updateCLI) throw new AppError(501, 'UPDATE_UNSUPPORTED', 'O provedor não oferece atualização automática.');
     return provider.updateCLI();
+  });
+
+  app.get('/api/cli/commands', async () => ({
+    commands: await commandRegistry.discoverCommands(),
+    refreshedAt: commandRegistry.lastRefreshedAt()
+  }));
+  app.get('/api/cli/help', async () => commandRegistry.getCommandHelp());
+  app.get('/api/cli/help/:command', async (request) => {
+    const params = request.params as { command: string };
+    return commandRegistry.getCommandHelp(params.command);
+  });
+  app.post('/api/cli/execute', async (request) => {
+    const schema = z.object({
+      command: z.string().min(1).max(64),
+      args: z.array(z.string().min(1).max(500)).max(20).default([]),
+      timeout_seconds: z.number().int().min(1).max(120).default(30)
+    });
+    const body = schema.parse(request.body);
+    return commandRegistry.executeCommand(body.command, body.args, body.timeout_seconds);
+  });
+  app.get('/api/cli/history/:workspaceId', async (request) => {
+    if (!mcpWorkspaces) throw new AppError(503, 'MCP_DISABLED', 'MCP workspaces não habilitados.');
+    const params = request.params as { workspaceId: string };
+    const query = request.query as { limit?: string };
+    const limit = query.limit ? Number(query.limit) : 10;
+    return {
+      workspaceId: params.workspaceId,
+      history: await mcpWorkspaces.getCommandHistory(params.workspaceId, limit)
+    };
   });
 
   const listCompatibleModels = async () => openAIModelList(await provider.listModels());
@@ -372,6 +412,10 @@ export async function buildApp(config: Config, options: { provider?: AIProvider 
     if (config.AGY_AUTO_UPDATE) void provider.updateCLI?.().catch((error) => app.log.warn({ err: error }, 'CLI update failed'));
   }, config.AGY_UPDATE_INTERVAL_MS);
   cliUpdate.unref();
+  const commandRefresh = setInterval(() => {
+    void commandRegistry.discoverCommands(true).catch((error) => app.log.warn({ err: error }, 'command refresh failed'));
+  }, config.CLI_COMMAND_REFRESH_INTERVAL_MS);
+  commandRefresh.unref();
   const startupMaintenance = setTimeout(() => {
     const action = config.AGY_AUTO_UPDATE ? provider.updateCLI?.() : provider.refreshModels?.(true);
     void action?.catch((error) => app.log.warn({ err: error }, 'startup maintenance failed'));
@@ -381,6 +425,7 @@ export async function buildApp(config: Config, options: { provider?: AIProvider 
     clearInterval(cleanup);
     clearInterval(modelRefresh);
     clearInterval(cliUpdate);
+    clearInterval(commandRefresh);
     clearTimeout(startupMaintenance);
     await mcpEndpoint?.handler.close();
     mcpAuth?.close();

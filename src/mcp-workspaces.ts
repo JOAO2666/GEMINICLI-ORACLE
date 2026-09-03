@@ -4,6 +4,31 @@ import path from 'node:path';
 import type { Config } from './config.js';
 import { AppError } from './errors.js';
 import type { AIProvider } from './types.js';
+import { resolveModelAlias } from './services/antigravity-provider.js';
+
+export interface WorkspaceExecutionMetrics {
+  timestamp: string;
+  model: string;
+  durationSeconds?: number;
+  goalSummary?: string;
+  usage?: Record<string, unknown>;
+}
+
+export interface WorkspaceMetadata {
+  id: string;
+  name: string;
+  createdAt: string;
+  selectedModel?: string;
+  lastExecution?: WorkspaceExecutionMetrics;
+}
+
+export interface WorkspaceHistoryEntry {
+  timestamp?: string;
+  command: string;
+  status: 'sucesso' | 'erro';
+  summary: string;
+  durationMs?: number;
+}
 
 const workspaceIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const skillNamePattern = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -147,6 +172,90 @@ export class McpWorkspaceService {
     return { ...metadata, ...(await pathSize(root)) };
   }
 
+  async getMetadata(workspaceId: string): Promise<WorkspaceMetadata> {
+    const root = await this.workspaceRoot(workspaceId);
+    const metadata = JSON.parse(await fs.readFile(path.join(root, '.workspace.json'), 'utf8')) as WorkspaceMetadata;
+    return metadata;
+  }
+
+  async saveMetadata(workspaceId: string, metadata: WorkspaceMetadata): Promise<void> {
+    const root = await this.workspaceRoot(workspaceId);
+    const temporary = path.join(root, `.workspace.json.${crypto.randomUUID()}.tmp`);
+    await fs.writeFile(temporary, JSON.stringify(metadata, null, 2), { mode: 0o600 });
+    await fs.rename(temporary, path.join(root, '.workspace.json'));
+  }
+
+  async getWorkspaceModel(workspaceId: string): Promise<string | undefined> {
+    const metadata = await this.getMetadata(workspaceId);
+    return metadata.selectedModel;
+  }
+
+  async setWorkspaceModel(workspaceId: string, requestedModel: string): Promise<{ previous?: string; current: string }> {
+    const metadata = await this.getMetadata(workspaceId);
+    const previous = metadata.selectedModel;
+    const discovered = await this.provider.listModels();
+    const available = discovered.length > 0 ? discovered : (this.config.allowedModels.length > 0 ? this.config.allowedModels : [this.config.DEFAULT_MODEL]);
+    const resolved = resolveModelAlias(requestedModel, available, this.config.DEFAULT_MODEL);
+    if (!resolved.model) {
+      if (resolved.ambiguous && resolved.ambiguous.length > 0) {
+        throw new AppError(400, 'AMBIGUOUS_MODEL', `Atalho de modelo ambíguo. Opções disponíveis: ${resolved.ambiguous.join(', ')}`);
+      }
+      throw new AppError(400, 'MODEL_NOT_AVAILABLE', `Modelo não disponível no Antigravity CLI. Disponíveis: ${available.join(', ')}`);
+    }
+    metadata.selectedModel = resolved.model;
+    await this.saveMetadata(workspaceId, metadata);
+    await this.appendCommandHistory(workspaceId, {
+      command: `model_set ${resolved.model}`,
+      status: 'sucesso',
+      summary: `Modelo alterado de ${previous ?? 'padrão'} para ${resolved.model}`
+    });
+    return { previous, current: resolved.model };
+  }
+
+  async getLastExecution(workspaceId: string): Promise<WorkspaceExecutionMetrics | null> {
+    const metadata = await this.getMetadata(workspaceId);
+    return metadata.lastExecution ?? null;
+  }
+
+  async appendCommandHistory(workspaceId: string, entry: WorkspaceHistoryEntry): Promise<void> {
+    const root = await this.workspaceRoot(workspaceId);
+    const historyFile = path.join(root, '.cli_history.json');
+    let history: WorkspaceHistoryEntry[] = [];
+    try {
+      const content = await fs.readFile(historyFile, 'utf8');
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed)) history = parsed;
+    } catch {
+      history = [];
+    }
+    history.unshift({
+      timestamp: entry.timestamp || new Date().toISOString(),
+      command: entry.command,
+      status: entry.status,
+      summary: entry.summary.slice(0, 300),
+      durationMs: entry.durationMs
+    });
+    if (history.length > 50) history = history.slice(0, 50);
+    const temporary = `${historyFile}.${crypto.randomUUID()}.tmp`;
+    await fs.writeFile(temporary, JSON.stringify(history, null, 2), { mode: 0o600 });
+    await fs.rename(temporary, historyFile);
+  }
+
+  async getCommandHistory(workspaceId: string, limit = 10): Promise<WorkspaceHistoryEntry[]> {
+    const root = await this.workspaceRoot(workspaceId);
+    const historyFile = path.join(root, '.cli_history.json');
+    try {
+      const content = await fs.readFile(historyFile, 'utf8');
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed)) {
+        return parsed.slice(0, Math.max(1, Math.min(50, limit)));
+      }
+    } catch {
+      // ignore
+    }
+    return [];
+  }
+
   async listFiles(workspaceId: string, relativePath = '.', recursive = true): Promise<Record<string, unknown>> {
     const { root, target } = await this.safePath(workspaceId, relativePath, true);
     const stat = await fs.stat(target).catch(() => null);
@@ -236,14 +345,40 @@ export class McpWorkspaceService {
 
   async goalRun(workspaceId: string, goal: string, model?: string, effort: 'low' | 'medium' | 'high' = 'high'): Promise<Record<string, unknown>> {
     const root = await this.workspaceRoot(workspaceId);
+    const metadata = await this.getMetadata(workspaceId);
     const discoveredModels = await this.provider.listModels();
     const availableModels = discoveredModels.length > 0
       ? discoveredModels
       : (this.config.allowedModels.length > 0 ? this.config.allowedModels : [this.config.DEFAULT_MODEL]);
-    const selectedModel = model ?? (availableModels.includes(this.config.DEFAULT_MODEL) ? this.config.DEFAULT_MODEL : availableModels[0]);
-    if (!selectedModel || !availableModels.includes(selectedModel)) {
-      throw new AppError(400, 'MODEL_NOT_AVAILABLE', 'O modelo solicitado não está disponível no Antigravity CLI.');
+
+    let resolvedModel: string | undefined;
+    let notice: string | undefined;
+
+    if (model) {
+      const aliasMatch = resolveModelAlias(model, availableModels, this.config.DEFAULT_MODEL);
+      if (!aliasMatch.model) {
+        if (aliasMatch.ambiguous && aliasMatch.ambiguous.length > 0) {
+          throw new AppError(400, 'AMBIGUOUS_MODEL', `Atalho de modelo ambíguo. Opções disponíveis: ${aliasMatch.ambiguous.join(', ')}`);
+        }
+        throw new AppError(400, 'MODEL_NOT_AVAILABLE', `O modelo solicitado não está disponível no Antigravity CLI. Disponíveis: ${availableModels.join(', ')}`);
+      }
+      resolvedModel = aliasMatch.model;
+    } else if (metadata.selectedModel) {
+      if (availableModels.includes(metadata.selectedModel)) {
+        resolvedModel = metadata.selectedModel;
+      } else {
+        const fallback = availableModels.includes(this.config.DEFAULT_MODEL) ? this.config.DEFAULT_MODEL : availableModels[0];
+        resolvedModel = fallback;
+        notice = `O modelo selecionado anteriormente para este workspace (${metadata.selectedModel}) não está mais disponível no Antigravity CLI. Usando ${resolvedModel}.`;
+      }
+    } else {
+      resolvedModel = availableModels.includes(this.config.DEFAULT_MODEL) ? this.config.DEFAULT_MODEL : availableModels[0];
     }
+
+    if (!resolvedModel) {
+      throw new AppError(400, 'MODEL_NOT_AVAILABLE', 'Nenhum modelo disponível no Antigravity CLI.');
+    }
+
     const prompt = [
       'Execute o objetivo solicitado dentro do workspace atual.',
       `O único workspace autorizado é exatamente: ${root}`,
@@ -256,16 +391,63 @@ export class McpWorkspaceService {
       '',
       `OBJETIVO:\n${goal}`
     ].join('\n');
-    const response = await this.provider.sendMessage({
-      conversationId: crypto.randomUUID(),
-      prompt,
-      model: selectedModel,
-      workingDirectory: root,
-      executionMode: 'accept-edits',
-      effort,
-      autoApprove: true
+
+    const started = Date.now();
+    let responseText = '';
+    let usage: unknown;
+
+    if (this.provider.sendMessageDetailed) {
+      const detailed = await this.provider.sendMessageDetailed({
+        conversationId: crypto.randomUUID(),
+        prompt,
+        model: resolvedModel,
+        workingDirectory: root,
+        executionMode: 'accept-edits',
+        effort,
+        autoApprove: true
+      });
+      responseText = detailed.text;
+      usage = detailed.usage;
+    } else {
+      responseText = await this.provider.sendMessage({
+        conversationId: crypto.randomUUID(),
+        prompt,
+        model: resolvedModel,
+        workingDirectory: root,
+        executionMode: 'accept-edits',
+        effort,
+        autoApprove: true
+      });
+    }
+
+    const durationSeconds = Math.round((Date.now() - started) / 100) / 10;
+    const executionUsage = usage && typeof usage === 'object' ? usage as Record<string, unknown> : undefined;
+
+    metadata.lastExecution = {
+      timestamp: new Date().toISOString(),
+      model: resolvedModel,
+      durationSeconds,
+      goalSummary: goal.slice(0, 100),
+      ...(executionUsage ? { usage: executionUsage } : {})
+    };
+    await this.saveMetadata(workspaceId, metadata);
+
+    await this.appendCommandHistory(workspaceId, {
+      command: `goal_run [${resolvedModel}]`,
+      status: 'sucesso',
+      summary: `Concluído em ${durationSeconds}s. Objetivo: ${goal.slice(0, 80)}`,
+      durationMs: Date.now() - started
     });
-    return { workspaceId, model: selectedModel, response, workspace: await this.info(workspaceId) };
+
+    return {
+      workspaceId,
+      model: resolvedModel,
+      ...(notice ? { notice } : {}),
+      response: responseText,
+      ...(executionUsage ? { usage: executionUsage } : {}),
+      durationSeconds,
+      workspace: await this.info(workspaceId)
+    };
   }
 
   async skillList(workspaceId: string): Promise<Record<string, unknown>> {

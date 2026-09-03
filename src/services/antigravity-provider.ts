@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { AppError, publicProviderError } from '../errors.js';
-import type { AIProvider, ProviderEvent, ProviderMaintenance, ProviderRequest, ProviderStatus } from '../types.js';
+import type { AIProvider, ProviderEvent, ProviderMaintenance, ProviderRequest, ProviderResult, ProviderStatus } from '../types.js';
 import type { Config } from '../config.js';
 import { Semaphore } from './queue.js';
 import { parseJsonLine } from './stream-parser.js';
@@ -66,6 +66,126 @@ export function parseAntigravityUsage(stdout: string): Record<string, unknown> {
   return { checkedAt: new Date().toISOString(), description: data.description, groups };
 }
 
+export function formatUsageBars(usageData: Record<string, unknown>): string {
+  const groups = Array.isArray(usageData.groups) ? usageData.groups : [];
+  if (groups.length === 0) {
+    return '📊 Uso do Antigravity\n\nNenhuma métrica de quota reportada pelo Antigravity CLI no momento.';
+  }
+
+  const sections: string[] = ['📊 Uso do Antigravity', ''];
+  for (const group of groups as Array<{ name?: string; description?: string; buckets?: Array<Record<string, unknown>> }>) {
+    if (group.name) {
+      sections.push(`### ${group.name}`);
+    }
+    const buckets = Array.isArray(group.buckets) ? group.buckets : [];
+    for (const bucket of buckets) {
+      const name = String(bucket.name || bucket.id || 'Quota');
+      const rem = typeof bucket.remainingPercent === 'number' ? bucket.remainingPercent : undefined;
+      const used = typeof bucket.usedPercent === 'number' ? bucket.usedPercent : undefined;
+      sections.push(name);
+      if (rem !== undefined) {
+        const filled = Math.max(0, Math.min(10, Math.round(rem / 10)));
+        const bar = '█'.repeat(filled) + '░'.repeat(10 - filled);
+        sections.push(`${bar} ${rem}% restante`);
+      }
+      if (used !== undefined) {
+        sections.push(`Usado: ${used}%`);
+      }
+      if (rem !== undefined) {
+        sections.push(`Restante: ${rem}%`);
+      }
+      if (bucket.resetTime) {
+        const date = new Date(String(bucket.resetTime));
+        const formattedDate = !Number.isNaN(date.getTime())
+          ? date.toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'short' })
+          : String(bucket.resetTime);
+        sections.push(`Reset: ${formattedDate}`);
+      }
+      sections.push('');
+    }
+  }
+  return sections.join('\n').trim();
+}
+
+function extractVersionWeight(name: string): number {
+  const matches = name.match(/\d+(?:\.\d+)?/g);
+  if (!matches) return 0;
+  return Number(matches[matches.length - 1] ?? 0) || 0;
+}
+
+export function resolveModelAlias(
+  alias: string,
+  availableModels: string[],
+  defaultModel?: string
+): { model?: string; ambiguous?: string[] } {
+  const clean = alias.trim().toLowerCase();
+  if (!clean) return {};
+
+  // 1. Exact match
+  const exact = availableModels.find((m) => m.toLowerCase() === clean);
+  if (exact) return { model: exact };
+
+  // 2. Specific known shortcuts
+  if (clean === 'flash' || clean === 'gemini-flash') {
+    const candidates = availableModels.filter((m) => /flash/i.test(m));
+    if (candidates.length === 1) return { model: candidates[0] };
+    if (candidates.length > 1) {
+      const highCandidates = candidates.filter((m) => /-high$/i.test(m));
+      const pool = highCandidates.length > 0 ? highCandidates : candidates;
+      if (defaultModel && pool.includes(defaultModel)) return { model: defaultModel };
+      pool.sort((a, b) => extractVersionWeight(b) - extractVersionWeight(a));
+      return { model: pool[0] };
+    }
+  }
+
+  if (clean === 'pro' || clean === 'gemini-pro') {
+    const candidates = availableModels.filter((m) => /pro/i.test(m));
+    if (candidates.length === 1) return { model: candidates[0] };
+    if (candidates.length > 1) {
+      const highCandidates = candidates.filter((m) => /-high$/i.test(m));
+      const pool = highCandidates.length > 0 ? highCandidates : candidates;
+      if (defaultModel && pool.includes(defaultModel)) return { model: defaultModel };
+      pool.sort((a, b) => extractVersionWeight(b) - extractVersionWeight(a));
+      return { model: pool[0] };
+    }
+  }
+
+  if (clean === 'flash-high' || clean === 'flash-medium' || clean === 'flash-low') {
+    const tier = clean.split('-')[1];
+    const candidates = availableModels.filter((m) => /flash/i.test(m) && m.toLowerCase().endsWith(`-${tier}`));
+    if (candidates.length === 1) return { model: candidates[0] };
+    if (candidates.length > 1) {
+      candidates.sort((a, b) => extractVersionWeight(b) - extractVersionWeight(a));
+      return { model: candidates[0] };
+    }
+  }
+
+  if (clean === 'sonnet' || clean === 'claude-sonnet') {
+    const candidates = availableModels.filter((m) => /sonnet/i.test(m));
+    if (candidates.length === 1) return { model: candidates[0] };
+    if (candidates.length > 1) {
+      candidates.sort((a, b) => extractVersionWeight(b) - extractVersionWeight(a));
+      return { model: candidates[0] };
+    }
+  }
+
+  if (clean === 'opus' || clean === 'claude-opus') {
+    const candidates = availableModels.filter((m) => /opus/i.test(m));
+    if (candidates.length === 1) return { model: candidates[0] };
+    if (candidates.length > 1) {
+      candidates.sort((a, b) => extractVersionWeight(b) - extractVersionWeight(a));
+      return { model: candidates[0] };
+    }
+  }
+
+  // 3. Substring search
+  const substringMatches = availableModels.filter((m) => m.toLowerCase().includes(clean));
+  if (substringMatches.length === 1) return { model: substringMatches[0] };
+  if (substringMatches.length > 1) return { ambiguous: substringMatches };
+
+  return {};
+}
+
 export function buildAntigravityArgs(request: ProviderRequest, timeoutMs: number): string[] {
   const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
   const args = [
@@ -85,6 +205,7 @@ export function buildAntigravityArgs(request: ProviderRequest, timeoutMs: number
 export class AntigravityCLIProvider implements AIProvider {
   private readonly semaphore: Semaphore;
   private readonly active = new Map<string, AbortController>();
+  private readonly catalogUpdateListeners: Array<() => void> = [];
   private modelCache: string[] = [];
   private modelsRefreshedAt = 0;
   private modelRefreshPromise?: Promise<string[]>;
@@ -93,6 +214,16 @@ export class AntigravityCLIProvider implements AIProvider {
 
   constructor(private readonly config: Config) {
     this.semaphore = new Semaphore(config.MAX_GEMINI_PROCESSES);
+  }
+
+  onCatalogUpdate(listener: () => void): void {
+    this.catalogUpdateListeners.push(listener);
+  }
+
+  private notifyCatalogUpdate(): void {
+    for (const listener of this.catalogUpdateListeners) {
+      try { listener(); } catch { /* ignore */ }
+    }
   }
 
   supportsFiles(): boolean { return true; }
@@ -114,6 +245,7 @@ export class AntigravityCLIProvider implements AIProvider {
           : unique;
         this.modelsRefreshedAt = Date.now();
         this.lastMaintenance.modelsRefreshedAt = new Date(this.modelsRefreshedAt).toISOString();
+        this.notifyCatalogUpdate();
       }
       const fallback = this.config.allowedModels.length > 0 ? this.config.allowedModels : [this.config.DEFAULT_MODEL];
       return [...(this.modelCache.length > 0 ? this.modelCache : fallback)];
@@ -145,10 +277,12 @@ export class AntigravityCLIProvider implements AIProvider {
       const beforeVersion = before?.stdout.trim();
       const installedVersion = after?.stdout.trim() || beforeVersion;
       const status: ProviderMaintenance = {
+        previousVersion: beforeVersion,
         installedVersion,
         updated: Boolean(beforeVersion && installedVersion && beforeVersion !== installedVersion),
         skipped: false,
-        message: update?.code === 0 ? 'Verificação de atualização concluída.' : 'Não foi possível atualizar o CLI; a versão instalada foi mantida.'
+        message: update?.code === 0 ? 'Verificação de atualização concluída.' : 'Não foi possível atualizar o CLI; a versão instalada foi mantida.',
+        modelsUpdated: update?.code === 0
       };
       this.lastMaintenance = { ...this.lastMaintenance, ...status };
       await this.refreshModels(true);
@@ -192,10 +326,19 @@ export class AntigravityCLIProvider implements AIProvider {
   }
 
   async sendMessage(request: ProviderRequest): Promise<string> {
-    let result = '';
+    return (await this.sendMessageDetailed(request)).text;
+  }
+
+  async sendMessageDetailed(request: ProviderRequest): Promise<ProviderResult> {
+    let result: ProviderResult = { text: '' };
     for await (const event of this.streamMessage(request)) {
-      if (event.type === 'delta') result += event.text;
-      if (event.type === 'complete') result = event.text;
+      if (event.type === 'delta') result.text += event.text;
+      if (event.type === 'complete') result = {
+        text: event.text,
+        ...(event.stats !== undefined ? { usage: event.stats } : {}),
+        ...(event.structuredOutput !== undefined ? { structuredOutput: event.structuredOutput } : {}),
+        ...(event.sessionId ? { sessionId: event.sessionId } : {})
+      };
     }
     return result;
   }
