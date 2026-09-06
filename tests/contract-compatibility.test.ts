@@ -102,6 +102,8 @@ describe('Compatibility Contract (YhikkaHub, Gemini Spark & Dual-Era MCP)', () =
       expect(toolMap.has('task_run')).toBe(true);
       expect(toolMap.has('artifact_revise')).toBe(true);
       expect(toolMap.has('artifact_get')).toBe(true);
+      expect(toolMap.has('storage_status')).toBe(true);
+      expect(toolMap.has('storage_cleanup')).toBe(true);
 
       // 3. Verify required parameter contract for original tools
       for (const [toolName, requiredParams] of Object.entries(MANDATORY_REQUIRED_PARAMS)) {

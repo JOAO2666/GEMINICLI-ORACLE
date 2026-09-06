@@ -25,6 +25,7 @@ import { mcpPublicUrls, registerMcpOAuthRoutes } from './mcp-oauth-routes.js';
 import { createWorkspaceMcpEndpoint, type McpEndpoint } from './mcp-server.js';
 import { McpWorkspaceService } from './mcp-workspaces.js';
 import { detectMimeType, verifyArtifactUrl } from './services/artifact-service.js';
+import { StorageGuardian } from './services/storage-guardian.js';
 
 function tokenMatches(header: string | undefined, expected: string): boolean {
   if (!header?.startsWith('Bearer ')) return false;
@@ -49,7 +50,7 @@ function publicError(error: unknown) {
 
 export async function buildApp(
   config: Config,
-  options: { provider?: AIProvider; commandRegistry?: AntigravityCommandRegistry } = {}
+  options: { provider?: AIProvider; commandRegistry?: AntigravityCommandRegistry; storageGuardian?: StorageGuardian } = {}
 ): Promise<FastifyInstance> {
   await fs.mkdir(config.dataDir, { recursive: true, mode: 0o700 });
   const app = Fastify({ logger: { redact: ['req.headers.authorization', 'request.headers.authorization'] }, trustProxy: config.TRUST_PROXY });
@@ -58,6 +59,7 @@ export async function buildApp(
   const chats = new ChatService(config, db);
   const provider = options.provider ?? new AntigravityCLIProvider(config);
   const commandRegistry = options.commandRegistry ?? new AntigravityCommandRegistry(config);
+  const storageGuardian = options.storageGuardian ?? new StorageGuardian(config, db);
   provider.onCatalogUpdate?.(() => {
     commandRegistry.invalidate();
   });
@@ -93,7 +95,7 @@ export async function buildApp(
   if (config.MCP_ENABLED) {
     if (config.MCP_WORKER_TOKEN.length < 32) throw new Error('MCP_WORKER_TOKEN precisa ter pelo menos 32 caracteres.');
     mcpAuth = new McpAuthStore(config.dataDir);
-    mcpWorkspaces = new McpWorkspaceService(config, provider);
+    mcpWorkspaces = new McpWorkspaceService(config, provider, db, storageGuardian);
     await mcpWorkspaces.initialize();
     await registerMcpOAuthRoutes(app, config, mcpAuth);
     mcpResource = mcpPublicUrls(config).resource;
@@ -136,6 +138,7 @@ export async function buildApp(
     try {
       db.listConversations();
       const auth = await provider.checkAuthentication().catch(() => ({ available: false, authenticated: false }));
+      const storage = await storageGuardian.getStorageStatus().catch(() => null);
       let workerHealth: Record<string, unknown> | null = null;
       if (config.MCP_WORKER_URL && config.MCP_WORKER_TOKEN) {
         try {
@@ -159,11 +162,32 @@ export async function buildApp(
         });
       }
 
+      if (storage?.status === 'hard_stop') {
+        return reply.code(200).send({
+          status: 'degraded',
+          reason: 'insufficient_storage',
+          database: 'ok',
+          provider: auth.available ? (auth.authenticated ? 'ok' : 'unauthenticated') : 'unavailable',
+          worker: workerHealth ?? 'unconfigured',
+          storage: {
+            usedPercent: storage.usedPercent,
+            freeBytes: storage.freeBytes,
+            status: storage.status
+          },
+          uptime: process.uptime()
+        });
+      }
+
       return reply.send({
         status: 'ok',
         database: 'ok',
         provider: auth.available ? (auth.authenticated ? 'ok' : 'unauthenticated') : 'unavailable',
         worker: workerHealth ?? 'unconfigured',
+        storage: storage ? {
+          usedPercent: storage.usedPercent,
+          freeBytes: storage.freeBytes,
+          status: storage.status
+        } : undefined,
         uptime: process.uptime()
       });
     } catch (error) {
@@ -394,6 +418,7 @@ export async function buildApp(
   });
 
   app.post('/api/files', async (request, reply) => {
+    await storageGuardian.ensureWritable();
     const conversationId = conversationIdSchema.parse((request.query as { conversationId?: string }).conversationId);
     const saved = [];
     for await (const part of request.parts()) {
@@ -481,7 +506,13 @@ export async function buildApp(
     void action?.catch((error) => app.log.warn({ err: error }, 'startup maintenance failed'));
   }, 5_000);
   startupMaintenance.unref();
+  if (config.STORAGE_GUARDIAN_ENABLED) {
+    storageGuardian.start();
+    void storageGuardian.runCleanup().catch((error) => app.log.warn({ err: error }, 'startup storage cleanup failed'));
+  }
+
   app.addHook('onClose', async () => {
+    storageGuardian.stop();
     clearInterval(cleanup);
     clearInterval(modelRefresh);
     clearInterval(cliUpdate);

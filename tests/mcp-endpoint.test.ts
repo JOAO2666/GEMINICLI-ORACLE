@@ -79,7 +79,7 @@ describe('Remote MCP endpoint', () => {
         'commands', 'file_edit', 'file_list', 'file_read', 'file_write', 'git_clone',
         'goal_run', 'model_current', 'model_set', 'models', 'shell_execute',
         'skill_catalog', 'skill_install', 'skill_install_catalog', 'skill_list',
-        'skill_read', 'skill_remove', 'skill_resources', 'status', 'task_run', 'usage',
+        'skill_read', 'skill_remove', 'skill_resources', 'status', 'storage_cleanup', 'storage_status', 'task_run', 'usage',
         'usage_last', 'workspace_create', 'workspace_delete', 'workspace_info'
       ]);
       const created = await client.callTool({ name: 'workspace_create', arguments: { name: 'Integração' } });

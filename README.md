@@ -250,6 +250,32 @@ O catálogo incluído instala automaticamente 18 skills em cada workspace: 13 sk
 
 Defina `MCP_WORKER_TOKEN` com outro valor aleatório de pelo menos 32 caracteres; ele deve ser diferente de `NUMIA_SERVER_TOKEN` e nunca deve ser enviado ao aplicativo ou versionado.
 
+## StorageGuardian: Gestão Autônoma de Disco e Política de 24 Horas
+
+Para evitar que o disco da Oracle VM atinja 100% de ocupação com acúmulo de arquivos gerados e uploads, o servidor conta com o **StorageGuardian**:
+
+1. **Política Estrita de 24 Horas (Descartável por Padrão)**:
+   - Todo arquivo gerado (PDF, DOCX, XLSX, PPTX, APKG, TXT, CSV, HTML, Markdown), upload, anexo e workspace temporário criado automaticamente por tarefas tem vida útil máxima de **24 horas**.
+   - Após 24 horas da criação, o recurso é fisicamente excluído do disco pelo StorageGuardian e sua URL/metadados são invalidados (retornando 410 Gone / 404).
+   - Sem sistema de "pin" ou guardar permanente: arquivos gerados são intencionalmente descartáveis.
+   - Baixar ou reabrir o arquivo não renova o prazo de 24 horas.
+
+2. **Caminhos Sagrados e Proteção de Dados Essenciais**:
+   - O StorageGuardian possui proteção de caminhos imunes (`isSacredPath`).
+   - **NUNCA são tocados**: credenciais OAuth Google (`/home/node/.gemini`, `antigravity-auth`), `.env`, banco de dados SQLite (`numia.db*`), `docker-compose.yml`, `Caddyfile`, catálogo original de skills e workspaces com tarefas em execução ativa (travados via *lease*).
+
+3. **Política Progressiva de Pressão de Disco**:
+   - `< 75%`: Operação normal.
+   - `75% - 84%`: Warning; execução de limpeza periódica normal (a cada 15 min).
+   - `85% - 89%`: Limpeza imediata de expirados e temporários antigos.
+   - `90% - 94%`: Limpeza agressiva (remove temporários mais antigos mesmo antes de completarem 24h).
+   - `95% - 97%`: Limpeza crítica imediata de todo temporário sem lock.
+   - `>= 98%`: Hard stop para novas operações pesadas de escrita (`INSUFFICIENT_STORAGE`), preservando leitura, status, diagnóstico e `/health`.
+
+4. **Ferramentas MCP e Comandos Rápidos**:
+   - `/storage` ou ferramenta `storage_status`: exibe status de disco, ocupação detalhada e última limpeza.
+   - Ferramenta `storage_cleanup`: executa limpeza manual imediata sob demanda.
+
 ## Sessões e histórico
 
 O `agy` oferece `--conversation` e o evento `init` fornece `conversation_id`. Este projeto registra o ID, mas **não depende da sessão interna**: recompõe um histórico limitado pelo SQLite e o envia a cada chamada. Esta opção é mais robusta porque:

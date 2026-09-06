@@ -294,14 +294,16 @@ export function createWorkspaceMcpEndpoint(
         { command: '/status', description: 'Exibe visão consolidada do servidor, CLI, autenticação e cotas' },
         { command: '/help', description: 'Exibe a ajuda geral dos comandos do Antigravity CLI' },
         { command: '/help <comando>', description: 'Exibe a ajuda detalhada e flags de um comando específico' },
-        { command: '/update', description: 'Executa a atualização protegida do Antigravity CLI' }
+        { command: '/update', description: 'Executa a atualização protegida do Antigravity CLI' },
+        { command: '/storage', description: 'Exibe o status do armazenamento e uso de disco do servidor' }
       ];
       const workspaceTools = [
         'artifact_create', 'task_run', 'artifact_revise', 'artifact_get',
         'workspace_create', 'workspace_delete', 'workspace_info', 'file_list', 'file_read',
         'file_write', 'file_edit', 'shell_execute', 'git_clone', 'goal_run', 'skill_list',
         'skill_catalog', 'skill_read', 'skill_resources', 'skill_install',
-        'skill_install_catalog', 'skill_remove', 'artifact_list', 'artifact_publish'
+        'skill_install_catalog', 'skill_remove', 'artifact_list', 'artifact_publish',
+        'storage_status', 'storage_cleanup'
       ];
       const lines = [
         '# Comandos Disponíveis',
@@ -486,6 +488,10 @@ export function createWorkspaceMcpEndpoint(
       if (wsInfo) {
         lines.push(`Workspace: ${String(wsInfo.name)} (${String(wsInfo.files ?? 0)} arquivos, ${String(wsInfo.bytes ?? 0)} bytes)`);
       }
+      const storage = await workspaces.storageStatus().catch(() => null);
+      if (storage) {
+        lines.push(`Armazenamento: ${storage.usedPercent}% usado (${(storage.freeBytes / (1024 * 1024 * 1024)).toFixed(1)} GB livres, status: ${storage.status})`);
+      }
       const refreshedAt = maintenance.modelsRefreshedAt ?? commandRegistry.lastRefreshedAt();
       if (refreshedAt) {
         lines.push(`Última atualização do catálogo: ${new Date(refreshedAt).toLocaleString('pt-BR')}`);
@@ -499,7 +505,12 @@ export function createWorkspaceMcpEndpoint(
           modelCount: models.length,
           currentModel,
           workspace: wsInfo,
-          maintenance
+          maintenance,
+          storage: storage ? {
+            usedPercent: storage.usedPercent,
+            freeBytes: storage.freeBytes,
+            status: storage.status
+          } : undefined
         }
       };
     }));
@@ -603,6 +614,78 @@ export function createWorkspaceMcpEndpoint(
         text: lines.join('\n'),
         data: { workspaceId: workspace_id, count: history.length, history }
       };
+    }));
+
+    server.registerTool('storage_status', {
+      title: 'Status de armazenamento do servidor',
+      description: 'Use esta ferramenta quando o usuário perguntar sobre espaço, armazenamento, disco ou capacidade do servidor. Exemplos: "Quanto espaço tem no servidor?", "Quanto de armazenamento estou usando?", "Meu servidor está cheio?", "Quanto ainda tenho de espaço?".',
+      inputSchema: z.object({}),
+      annotations: readOnly
+    }, () => guardedFormatted(async () => {
+      const status = await workspaces.storageStatus();
+      if (!status) {
+        throw new AppError(503, 'STORAGE_UNAVAILABLE', 'Monitoramento de armazenamento não disponível.');
+      }
+      const formatBytes = (bytes: number) => {
+        if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+        if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+        if (bytes >= 1024) return `${(bytes / 1024).toFixed(2)} KB`;
+        return `${bytes} B`;
+      };
+      const text = [
+        '# Armazenamento do Servidor',
+        '',
+        `Status: ${status.status.toUpperCase()}`,
+        `Uso total de disco: ${status.usedPercent}% (${formatBytes(status.usedBytes)} / ${formatBytes(status.totalBytes)})`,
+        `Espaço livre: ${formatBytes(status.freeBytes)}`,
+        '',
+        '## Detalhamento de Dados',
+        `• Diretório de dados: ${formatBytes(status.dataBytes)}`,
+        `• Workspaces de tarefas: ${formatBytes(status.workspaceBytes)}`,
+        `• Artefatos publicados: ${formatBytes(status.artifactBytes)}`,
+        `• Uploads / Anexos: ${formatBytes(status.uploadBytes)}`,
+        `• Arquivos temporários: ${formatBytes(status.temporaryBytes)}`,
+        `• Lixeira (.trash): ${formatBytes(status.trashBytes)}`,
+        `• Banco de dados (SQLite): ${formatBytes(status.databaseBytes)}`,
+        '',
+        `Limpeza automática: ${status.cleanupEnabled ? 'Ativada (retenção máx. 24h)' : 'Desativada'}`,
+        status.lastCleanupAt ? `Última limpeza: ${new Date(status.lastCleanupAt).toLocaleString('pt-BR')} (${formatBytes(status.lastCleanupFreedBytes)} liberados)` : 'Nenhuma limpeza executada recentemente.'
+      ].join('\n');
+      return { text, data: status as unknown as Record<string, unknown> };
+    }));
+
+    server.registerTool('storage_cleanup', {
+      title: 'Limpeza manual de armazenamento do servidor',
+      description: 'Executa limpeza manual imediata de arquivos temporários, workspaces expirados, artefatos antigos e lixo, liberando espaço em disco sem afetar autenticação, banco de dados ou execuções ativas.',
+      inputSchema: z.object({
+        aggressive: z.boolean().optional().describe('Se verdadeiro, executa limpeza agressiva liberando temporários não expirados')
+      }),
+      annotations: destructive
+    }, ({ aggressive }) => guardedFormatted(async () => {
+      const result = await workspaces.storageCleanup(aggressive);
+      if (!result) {
+        throw new AppError(503, 'STORAGE_UNAVAILABLE', 'Serviço de limpeza de armazenamento não disponível.');
+      }
+      const formatBytes = (bytes: number) => {
+        if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+        if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+        if (bytes >= 1024) return `${(bytes / 1024).toFixed(2)} KB`;
+        return `${bytes} B`;
+      };
+      const text = [
+        '# Limpeza de Armazenamento Concluída',
+        '',
+        `Espaço liberado: ${formatBytes(result.freedBytes)}`,
+        `Uso anterior: ${formatBytes(result.beforeUsedBytes)} -> Uso atual: ${formatBytes(result.afterUsedBytes)}`,
+        `Duração: ${result.durationMs}ms`,
+        '',
+        '## Itens Removidos',
+        `• Artefatos: ${result.deletedArtifacts}`,
+        `• Uploads: ${result.deletedUploads}`,
+        `• Workspaces temporários: ${result.deletedWorkspaces}`,
+        `• Arquivos temporários / lixo: ${result.deletedTemporaryFiles}`
+      ].join('\n');
+      return { text, data: result as unknown as Record<string, unknown> };
     }));
 
     return server;

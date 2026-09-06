@@ -272,6 +272,22 @@ export class AppDatabase {
     ).all(workspaceId) as ArtifactRecord[];
   }
 
+  deleteArtifact(id: string): void {
+    this.db.prepare('DELETE FROM artifacts WHERE id = ?').run(id);
+  }
+
+  listExpiredArtifacts(cutoffIso: string): ArtifactRecord[] {
+    return this.db.prepare(
+      'SELECT * FROM artifacts WHERE expires_at <= ? OR created_at <= ? ORDER BY created_at ASC'
+    ).all(cutoffIso, cutoffIso) as ArtifactRecord[];
+  }
+
+  listAllArtifacts(): ArtifactRecord[] {
+    return this.db.prepare(
+      'SELECT * FROM artifacts ORDER BY created_at ASC'
+    ).all() as ArtifactRecord[];
+  }
+
   // Jobs methods
   createJob(type: string, workspaceId?: string | null): JobRecord {
     const now = new Date().toISOString();

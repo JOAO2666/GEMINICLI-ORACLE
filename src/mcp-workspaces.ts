@@ -2,10 +2,12 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Config } from './config.js';
+import type { AppDatabase } from './database.js';
 import { AppError } from './errors.js';
 import type { AIProvider } from './types.js';
 import { resolveModelAlias } from './services/antigravity-provider.js';
 import { detectMimeType, signArtifactUrl, validateArtifactFile } from './services/artifact-service.js';
+import type { StorageGuardian } from './services/storage-guardian.js';
 
 export interface WorkspaceExecutionMetrics {
   timestamp: string;
@@ -19,6 +21,7 @@ export interface WorkspaceMetadata {
   id: string;
   name: string;
   createdAt: string;
+  temporary?: boolean;
   selectedModel?: string;
   lastExecution?: WorkspaceExecutionMetrics;
 }
@@ -92,7 +95,12 @@ export class McpWorkspaceService {
   private readonly artifactsRoot: string;
   private readonly skillCatalogRoot: string;
 
-  constructor(private readonly config: Config, private readonly provider: AIProvider) {
+  constructor(
+    private readonly config: Config,
+    private readonly provider: AIProvider,
+    private readonly database?: AppDatabase,
+    private readonly guardian?: StorageGuardian
+  ) {
     this.root = config.mcpWorkspacesDir;
     this.trashRoot = path.join(this.root, '.trash');
     this.artifactsRoot = path.join(config.dataDir, 'mcp-artifacts');
@@ -140,11 +148,19 @@ export class McpWorkspaceService {
     return { root, target };
   }
 
-  async create(name: string): Promise<Record<string, unknown>> {
+  async create(name: string, options?: { temporary?: boolean }): Promise<Record<string, unknown>> {
+    if (this.guardian) {
+      await this.guardian.ensureWritable();
+    }
     const id = crypto.randomUUID();
     const root = path.join(this.root, id);
     const createdAt = new Date().toISOString();
-    const metadata = { id, name: cleanName(name, 'Novo workspace'), createdAt };
+    const metadata: WorkspaceMetadata = {
+      id,
+      name: cleanName(name, 'Novo workspace'),
+      createdAt,
+      temporary: options?.temporary ?? false
+    };
     // The worker supervisor starts as a credential-less root process and drops to
     // UID 1000 for commands. It needs traverse-only access before dropping UID;
     // files themselves remain private (0600) and the volume is not public.
@@ -294,6 +310,7 @@ export class McpWorkspaceService {
 
   async writeFile(workspaceId: string, relativePath: string, content: string, overwrite: boolean): Promise<Record<string, unknown>> {
     if (Buffer.byteLength(content) > maxTextBytes) throw new AppError(413, 'CONTENT_TOO_LARGE', 'Conteúdo maior que 1 MB.');
+    if (this.guardian) await this.guardian.ensureWritable(Buffer.byteLength(content));
     const { root, target } = await this.safePath(workspaceId, relativePath);
     if (path.basename(target) === '.workspace.json') throw new AppError(403, 'PROTECTED_FILE', 'Metadados do workspace são protegidos.');
     await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
@@ -336,12 +353,36 @@ export class McpWorkspaceService {
 
   async shellExecute(workspaceId: string, command: string, timeoutSeconds: number): Promise<Record<string, unknown>> {
     await this.workspaceRoot(workspaceId);
-    return this.callWorker('/run', { workspaceId, command, timeoutSeconds });
+    if (this.guardian) {
+      await this.guardian.ensureWritable();
+      this.guardian.acquireLease(workspaceId);
+    }
+    try {
+      const res = await this.callWorker('/run', { workspaceId, command, timeoutSeconds });
+      if (this.guardian) {
+        await this.guardian.checkWorkspaceSize(workspaceId);
+      }
+      return res;
+    } finally {
+      this.guardian?.releaseLease(workspaceId);
+    }
   }
 
   async gitClone(workspaceId: string, repositoryUrl: string, destination: string, ref?: string): Promise<Record<string, unknown>> {
     await this.workspaceRoot(workspaceId);
-    return this.callWorker('/git-clone', { workspaceId, repositoryUrl, destination, ref });
+    if (this.guardian) {
+      await this.guardian.ensureWritable();
+      this.guardian.acquireLease(workspaceId);
+    }
+    try {
+      const res = await this.callWorker('/git-clone', { workspaceId, repositoryUrl, destination, ref });
+      if (this.guardian) {
+        await this.guardian.checkWorkspaceSize(workspaceId);
+      }
+      return res;
+    } finally {
+      this.guardian?.releaseLease(workspaceId);
+    }
   }
 
   async goalRun(workspaceId: string, goal: string, model?: string, effort: 'low' | 'medium' | 'high' = 'high'): Promise<Record<string, unknown>> {
@@ -397,58 +438,71 @@ export class McpWorkspaceService {
     let responseText = '';
     let usage: unknown;
 
-    if (this.provider.sendMessageDetailed) {
-      const detailed = await this.provider.sendMessageDetailed({
-        conversationId: crypto.randomUUID(),
-        prompt,
-        model: resolvedModel,
-        workingDirectory: root,
-        executionMode: 'accept-edits',
-        effort,
-        autoApprove: true
-      });
-      responseText = detailed.text;
-      usage = detailed.usage;
-    } else {
-      responseText = await this.provider.sendMessage({
-        conversationId: crypto.randomUUID(),
-        prompt,
-        model: resolvedModel,
-        workingDirectory: root,
-        executionMode: 'accept-edits',
-        effort,
-        autoApprove: true
-      });
+    if (this.guardian) {
+      await this.guardian.ensureWritable();
+      this.guardian.acquireLease(workspaceId);
     }
 
-    const durationSeconds = Math.round((Date.now() - started) / 100) / 10;
-    const executionUsage = usage && typeof usage === 'object' ? usage as Record<string, unknown> : undefined;
+    try {
+      if (this.provider.sendMessageDetailed) {
+        const detailed = await this.provider.sendMessageDetailed({
+          conversationId: crypto.randomUUID(),
+          prompt,
+          model: resolvedModel,
+          workingDirectory: root,
+          executionMode: 'accept-edits',
+          effort,
+          autoApprove: true
+        });
+        responseText = detailed.text;
+        usage = detailed.usage;
+      } else {
+        responseText = await this.provider.sendMessage({
+          conversationId: crypto.randomUUID(),
+          prompt,
+          model: resolvedModel,
+          workingDirectory: root,
+          executionMode: 'accept-edits',
+          effort,
+          autoApprove: true
+        });
+      }
 
-    metadata.lastExecution = {
-      timestamp: new Date().toISOString(),
-      model: resolvedModel,
-      durationSeconds,
-      goalSummary: goal.slice(0, 100),
-      ...(executionUsage ? { usage: executionUsage } : {})
-    };
-    await this.saveMetadata(workspaceId, metadata);
+      const durationSeconds = Math.round((Date.now() - started) / 100) / 10;
+      const executionUsage = usage && typeof usage === 'object' ? usage as Record<string, unknown> : undefined;
 
-    await this.appendCommandHistory(workspaceId, {
-      command: `goal_run [${resolvedModel}]`,
-      status: 'sucesso',
-      summary: `Concluído em ${durationSeconds}s. Objetivo: ${goal.slice(0, 80)}`,
-      durationMs: Date.now() - started
-    });
+      metadata.lastExecution = {
+        timestamp: new Date().toISOString(),
+        model: resolvedModel,
+        durationSeconds,
+        goalSummary: goal.slice(0, 100),
+        ...(executionUsage ? { usage: executionUsage } : {})
+      };
+      await this.saveMetadata(workspaceId, metadata);
 
-    return {
-      workspaceId,
-      model: resolvedModel,
-      ...(notice ? { notice } : {}),
-      response: responseText,
-      ...(executionUsage ? { usage: executionUsage } : {}),
-      durationSeconds,
-      workspace: await this.info(workspaceId)
-    };
+      await this.appendCommandHistory(workspaceId, {
+        command: `goal_run [${resolvedModel}]`,
+        status: 'sucesso',
+        summary: `Concluído em ${durationSeconds}s. Objetivo: ${goal.slice(0, 80)}`,
+        durationMs: Date.now() - started
+      });
+
+      if (this.guardian) {
+        await this.guardian.checkWorkspaceSize(workspaceId);
+      }
+
+      return {
+        workspaceId,
+        model: resolvedModel,
+        ...(notice ? { notice } : {}),
+        response: responseText,
+        ...(executionUsage ? { usage: executionUsage } : {}),
+        durationSeconds,
+        workspace: await this.info(workspaceId)
+      };
+    } finally {
+      this.guardian?.releaseLease(workspaceId);
+    }
   }
 
   async skillList(workspaceId: string): Promise<Record<string, unknown>> {
@@ -616,6 +670,10 @@ export class McpWorkspaceService {
     if (!stat?.isFile()) throw new AppError(404, 'FILE_NOT_FOUND', 'Arquivo não encontrado.');
     if (stat.size > this.config.MAX_ARTIFACT_BYTES) throw new AppError(413, 'ARTIFACT_TOO_LARGE', 'Artefato excede o limite máximo configurado.');
 
+    if (this.guardian) {
+      await this.guardian.ensureWritable(stat.size);
+    }
+
     const name = cleanName(path.basename(target), 'artifact.bin');
     const validation = await validateArtifactFile(target, name);
     if (!validation.valid) {
@@ -636,6 +694,20 @@ export class McpWorkspaceService {
       ttlSeconds: this.config.ARTIFACT_RETENTION_HOURS * 3600
     });
 
+    if (this.database) {
+      this.database.saveArtifact({
+        id: artifactId,
+        workspace_id: workspaceId,
+        name,
+        stored_path: destination,
+        mime_type: validation.mimeType,
+        size: stat.size,
+        sha256: validation.sha256,
+        created_at: new Date().toISOString(),
+        expires_at: signed.expiresAt
+      });
+    }
+
     return {
       workspaceId,
       artifactId,
@@ -654,29 +726,51 @@ export class McpWorkspaceService {
     await this.workspaceRoot(workspaceId);
     const root = path.join(this.artifactsRoot, workspaceId);
     const artifacts: Array<Record<string, unknown>> = [];
+    const now = Date.now();
     for (const idEntry of await fs.readdir(root, { withFileTypes: true }).catch(() => [])) {
       if (!idEntry.isDirectory() || !workspaceIdPattern.test(idEntry.name)) continue;
       for (const fileEntry of await fs.readdir(path.join(root, idEntry.name), { withFileTypes: true })) {
         if (!fileEntry.isFile()) continue;
         const full = path.join(root, idEntry.name, fileEntry.name);
         const stat = await fs.stat(full);
+
+        let expiresAtMs = stat.birthtimeMs + this.config.ARTIFACT_RETENTION_HOURS * 3_600_000;
+        let createdAtIso = stat.birthtime.toISOString();
+        let expiresAtIso = new Date(expiresAtMs).toISOString();
+
+        if (this.database) {
+          const record = this.database.getArtifact(workspaceId, idEntry.name);
+          if (record) {
+            expiresAtMs = new Date(record.expires_at).getTime();
+            createdAtIso = record.created_at;
+            expiresAtIso = record.expires_at;
+          }
+        }
+
+        if (now >= expiresAtMs) {
+          await fs.rm(path.join(root, idEntry.name), { recursive: true, force: true }).catch(() => undefined);
+          if (this.database) this.database.deleteArtifact(idEntry.name);
+          continue;
+        }
+
+        const remainingTtlSeconds = Math.max(1, Math.floor((expiresAtMs - now) / 1000));
         const signed = signArtifactUrl({
           baseUrl: this.publicBaseUrl(),
           workspaceId,
           artifactId: idEntry.name,
           filename: fileEntry.name,
           secretKey: this.config.artifactSigningKey,
-          ttlSeconds: this.config.ARTIFACT_RETENTION_HOURS * 3600
+          ttlSeconds: remainingTtlSeconds
         });
         artifacts.push({
           artifactId: idEntry.name,
           name: fileEntry.name,
           size: stat.size,
           mimeType: detectMimeType(fileEntry.name),
-          createdAt: stat.birthtime.toISOString(),
+          createdAt: createdAtIso,
           url: signed.url,
           downloadUrl: signed.url,
-          expiresAt: signed.expiresAt
+          expiresAt: expiresAtIso
         });
       }
     }
@@ -701,6 +795,10 @@ export class McpWorkspaceService {
     model?: string;
     effort?: 'low' | 'medium' | 'high';
   }): Promise<Record<string, unknown>> {
+    if (this.guardian) {
+      await this.guardian.ensureWritable();
+    }
+
     let fmt = params.format ?? 'auto';
     if (fmt === 'auto') {
       const lower = params.request.toLowerCase();
@@ -724,58 +822,66 @@ export class McpWorkspaceService {
     let workspaceId = params.workspace_id;
     if (!workspaceId) {
       const wsName = params.filename ? `Artifact - ${params.filename}` : `Artifact - ${fmt.toUpperCase()}`;
-      const ws = await this.create(wsName);
+      const ws = await this.create(wsName, { temporary: true });
       workspaceId = String(ws.id);
     }
     const root = await this.workspaceRoot(workspaceId);
 
-    // Ensure skill is installed
-    await this.installCatalogSkills(workspaceId, [targetSkill], false).catch(() => undefined);
-
-    let outName = params.filename ? cleanName(path.basename(params.filename), `artifact.${fmt}`) : `documento.${fmt}`;
-    if (!outName.toLowerCase().endsWith(`.${fmt}`)) {
-      outName = `${outName}.${fmt}`;
+    if (this.guardian) {
+      this.guardian.acquireLease(workspaceId);
     }
 
-    const goal = [
-      `Crie o documento ou artefato solicitado: "${params.request}"`,
-      `Formato obrigatório: ${fmt.toUpperCase()}`,
-      `Arquivo final deve ser salvo exatamente em: ${outName}`,
-      `Consulte as instruções e scripts da skill em .agents/skills/${targetSkill}/SKILL.md para gerar o arquivo corretamente.`,
-      `Certifique-se de que o arquivo ${outName} seja gerado com sucesso e não esteja vazio.`
-    ].join('\n');
+    try {
+      // Ensure skill is installed
+      await this.installCatalogSkills(workspaceId, [targetSkill], false).catch(() => undefined);
 
-    await this.goalRun(workspaceId, goal, params.model, params.effort ?? 'high');
-
-    let candidatePath = path.join(root, outName);
-    let stat = await fs.stat(candidatePath).catch(() => null);
-    if (!stat || !stat.isFile()) {
-      const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
-      const matched = entries.find((e) => e.isFile() && e.name.toLowerCase().endsWith(`.${fmt}`));
-      if (matched) {
-        candidatePath = path.join(root, matched.name);
-        outName = matched.name;
-        stat = await fs.stat(candidatePath).catch(() => null);
+      let outName = params.filename ? cleanName(path.basename(params.filename), `artifact.${fmt}`) : `documento.${fmt}`;
+      if (!outName.toLowerCase().endsWith(`.${fmt}`)) {
+        outName = `${outName}.${fmt}`;
       }
-    }
 
-    if (!stat || !stat.isFile()) {
-      throw new AppError(500, 'ARTIFACT_GENERATION_FAILED', `O agente concluiu o objetivo mas o arquivo ${outName} não foi encontrado no workspace.`);
-    }
+      const goal = [
+        `Crie o documento ou artefato solicitado: "${params.request}"`,
+        `Formato obrigatório: ${fmt.toUpperCase()}`,
+        `Arquivo final deve ser salvo exatamente em: ${outName}`,
+        `Consulte as instruções e scripts da skill em .agents/skills/${targetSkill}/SKILL.md para gerar o arquivo corretamente.`,
+        `Certifique-se de que o arquivo ${outName} seja gerado com sucesso e não esteja vazio.`
+      ].join('\n');
 
-    const published = await this.publishArtifact(workspaceId, outName);
-    return {
-      success: true,
-      workspaceId,
-      artifactId: published.artifactId,
-      filename: outName,
-      mimeType: published.mimeType,
-      size: published.size,
-      sha256: published.sha256,
-      url: published.url,
-      downloadUrl: published.downloadUrl,
-      expiresAt: published.expiresAt
-    };
+      await this.goalRun(workspaceId, goal, params.model, params.effort ?? 'high');
+
+      let candidatePath = path.join(root, outName);
+      let stat = await fs.stat(candidatePath).catch(() => null);
+      if (!stat || !stat.isFile()) {
+        const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+        const matched = entries.find((e) => e.isFile() && e.name.toLowerCase().endsWith(`.${fmt}`));
+        if (matched) {
+          candidatePath = path.join(root, matched.name);
+          outName = matched.name;
+          stat = await fs.stat(candidatePath).catch(() => null);
+        }
+      }
+
+      if (!stat || !stat.isFile()) {
+        throw new AppError(500, 'ARTIFACT_GENERATION_FAILED', `O agente concluiu o objetivo mas o arquivo ${outName} não foi encontrado no workspace.`);
+      }
+
+      const published = await this.publishArtifact(workspaceId, outName);
+      return {
+        success: true,
+        workspaceId,
+        artifactId: published.artifactId,
+        filename: outName,
+        mimeType: published.mimeType,
+        size: published.size,
+        sha256: published.sha256,
+        url: published.url,
+        downloadUrl: published.downloadUrl,
+        expiresAt: published.expiresAt
+      };
+    } finally {
+      this.guardian?.releaseLease(workspaceId);
+    }
   }
 
   async taskRun(params: {
@@ -786,29 +892,41 @@ export class McpWorkspaceService {
     model?: string;
     effort?: 'low' | 'medium' | 'high';
   }): Promise<Record<string, unknown>> {
+    if (this.guardian) {
+      await this.guardian.ensureWritable();
+    }
+
     let workspaceId = params.workspace_id;
     if (!workspaceId) {
-      const ws = await this.create('Task Workspace');
+      const ws = await this.create('Task Workspace', { temporary: true });
       workspaceId = String(ws.id);
     }
 
-    if (params.repository_url) {
-      await this.gitClone(workspaceId, params.repository_url, 'repo', params.ref).catch(() => undefined);
+    if (this.guardian) {
+      this.guardian.acquireLease(workspaceId);
     }
 
-    const goalResult = await this.goalRun(workspaceId, params.request, params.model, params.effort ?? 'high');
-    const files = await this.listFiles(workspaceId, '.', true);
-    const artifacts = await this.listArtifacts(workspaceId);
+    try {
+      if (params.repository_url) {
+        await this.gitClone(workspaceId, params.repository_url, 'repo', params.ref).catch(() => undefined);
+      }
 
-    return {
-      success: true,
-      workspaceId,
-      model: goalResult.model,
-      durationSeconds: goalResult.durationSeconds,
-      summary: goalResult.response,
-      filesCount: Array.isArray(files.entries) ? files.entries.length : 0,
-      artifacts: artifacts.artifacts
-    };
+      const goalResult = await this.goalRun(workspaceId, params.request, params.model, params.effort ?? 'high');
+      const files = await this.listFiles(workspaceId, '.', true);
+      const artifacts = await this.listArtifacts(workspaceId);
+
+      return {
+        success: true,
+        workspaceId,
+        model: goalResult.model,
+        durationSeconds: goalResult.durationSeconds,
+        summary: goalResult.response,
+        filesCount: Array.isArray(files.entries) ? files.entries.length : 0,
+        artifacts: artifacts.artifacts
+      };
+    } finally {
+      this.guardian?.releaseLease(workspaceId);
+    }
   }
 
   async artifactRevise(params: {
@@ -818,39 +936,48 @@ export class McpWorkspaceService {
     model?: string;
     effort?: 'low' | 'medium' | 'high';
   }): Promise<Record<string, unknown>> {
-    const root = await this.workspaceRoot(params.workspace_id);
-    const goal = [
-      `Revise o documento/artefato com as seguintes instruções: "${params.instructions}"`,
-      params.artifact_name ? `Artefato específico a revisar: ${params.artifact_name}` : 'Atualize o documento correspondente.',
-      'Mantenha as alterações consistentes e certifique-se de salvar a versão atualizada.'
-    ].join('\n');
-
-    await this.goalRun(params.workspace_id, goal, params.model, params.effort ?? 'high');
-
-    let targetName = params.artifact_name;
-    if (!targetName) {
-      const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
-      const doc = entries.find((e) => e.isFile() && /\.(pdf|docx|xlsx|pptx|apkg|html|md|txt)$/i.test(e.name));
-      if (doc) targetName = doc.name;
+    if (this.guardian) {
+      await this.guardian.ensureWritable();
+      this.guardian.acquireLease(params.workspace_id);
     }
 
-    if (!targetName) {
-      throw new AppError(404, 'ARTIFACT_NOT_FOUND', 'Nenhum documento encontrado para publicar como revisão.');
-    }
+    try {
+      const root = await this.workspaceRoot(params.workspace_id);
+      const goal = [
+        `Revise o documento/artefato com as seguintes instruções: "${params.instructions}"`,
+        params.artifact_name ? `Artefato específico a revisar: ${params.artifact_name}` : 'Atualize o documento correspondente.',
+        'Mantenha as alterações consistentes e certifique-se de salvar a versão atualizada.'
+      ].join('\n');
 
-    const published = await this.publishArtifact(params.workspace_id, targetName);
-    return {
-      success: true,
-      workspaceId: params.workspace_id,
-      artifactId: published.artifactId,
-      filename: published.name,
-      mimeType: published.mimeType,
-      size: published.size,
-      sha256: published.sha256,
-      url: published.url,
-      downloadUrl: published.downloadUrl,
-      expiresAt: published.expiresAt
-    };
+      await this.goalRun(params.workspace_id, goal, params.model, params.effort ?? 'high');
+
+      let targetName = params.artifact_name;
+      if (!targetName) {
+        const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+        const doc = entries.find((e) => e.isFile() && /\.(pdf|docx|xlsx|pptx|apkg|html|md|txt)$/i.test(e.name));
+        if (doc) targetName = doc.name;
+      }
+
+      if (!targetName) {
+        throw new AppError(404, 'ARTIFACT_NOT_FOUND', 'Nenhum documento encontrado para publicar como revisão.');
+      }
+
+      const published = await this.publishArtifact(params.workspace_id, targetName);
+      return {
+        success: true,
+        workspaceId: params.workspace_id,
+        artifactId: published.artifactId,
+        filename: published.name,
+        mimeType: published.mimeType,
+        size: published.size,
+        sha256: published.sha256,
+        url: published.url,
+        downloadUrl: published.downloadUrl,
+        expiresAt: published.expiresAt
+      };
+    } finally {
+      this.guardian?.releaseLease(params.workspace_id);
+    }
   }
 
   async artifactGet(workspaceId: string, artifactId: string): Promise<Record<string, unknown>> {
@@ -864,6 +991,28 @@ export class McpWorkspaceService {
 
     const filePath = path.join(root, file.name);
     const stat = await fs.stat(filePath);
+
+    const now = Date.now();
+    let expiresAtMs = stat.birthtimeMs + this.config.ARTIFACT_RETENTION_HOURS * 3_600_000;
+    let createdAtIso = stat.birthtime.toISOString();
+    let expiresAtIso = new Date(expiresAtMs).toISOString();
+
+    if (this.database) {
+      const record = this.database.getArtifact(workspaceId, artifactId);
+      if (record) {
+        expiresAtMs = new Date(record.expires_at).getTime();
+        createdAtIso = record.created_at;
+        expiresAtIso = record.expires_at;
+      }
+    }
+
+    if (now >= expiresAtMs) {
+      await fs.rm(root, { recursive: true, force: true }).catch(() => undefined);
+      if (this.database) this.database.deleteArtifact(artifactId);
+      throw new AppError(410, 'ARTIFACT_EXPIRED', 'Artefato expirado e removido do servidor (retenção máx. 24h).');
+    }
+
+    const remainingTtlSeconds = Math.max(1, Math.floor((expiresAtMs - now) / 1000));
     const mimeType = detectMimeType(file.name);
 
     const signed = signArtifactUrl({
@@ -872,7 +1021,7 @@ export class McpWorkspaceService {
       artifactId,
       filename: file.name,
       secretKey: this.config.artifactSigningKey,
-      ttlSeconds: this.config.ARTIFACT_RETENTION_HOURS * 3600
+      ttlSeconds: remainingTtlSeconds
     });
 
     return {
@@ -881,9 +1030,22 @@ export class McpWorkspaceService {
       name: file.name,
       size: stat.size,
       mimeType,
+      createdAt: createdAtIso,
       url: signed.url,
       downloadUrl: signed.url,
-      expiresAt: signed.expiresAt
+      expiresAt: expiresAtIso
     };
+  }
+
+  async storageStatus() {
+    return this.guardian ? this.guardian.getStorageStatus() : null;
+  }
+
+  async storageCleanup(aggressive?: boolean) {
+    return this.guardian ? this.guardian.runCleanup({ aggressive }) : null;
+  }
+
+  getGuardian(): StorageGuardian | undefined {
+    return this.guardian;
   }
 }
