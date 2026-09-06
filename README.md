@@ -1,19 +1,19 @@
-# NumIA Gemini Server
+# Gemini API ILIMITADO
 
-Backend privado que conecta o NumIA ao **Antigravity CLI oficial do Google**, autenticado com a conta Google AI Pro do proprietário. Não usa Gemini API Key, não replica chamadas internas do Google e nunca envia as credenciais OAuth ao Android.
+Backend privado de alto desempenho que conecta qualquer aplicação ao **Antigravity CLI oficial do Google**, autenticado com a conta Google AI Pro do proprietário. Não usa Gemini API Key tradicional, não replica chamadas internas do Google e nunca envia as credenciais OAuth aos clientes. Oferece acesso ilimitado aos modelos Gemini (3.8 Flash, 3.1 Pro), Claude (Sonnet 4.6, Opus 4.6 Thinking) e GPT-OSS via API REST/SSE, Servidor MCP e Controle Remoto Web oficial.
 
 > Desde 18 de junho de 2026, o Google desativou o login pessoal do antigo Gemini CLI para os planos Individuals, Google AI Pro e Google AI Ultra. O sucessor oficial é o Antigravity CLI (`agy`). O backend usa esse caminho suportado e continua acessando os modelos Gemini da assinatura, incluindo Gemini 3.1 Pro.
 
 ## Arquitetura
 
 ```text
-NumIA Android ──HTTPS/Bearer──> Fastify ──spawn(args[])──> Antigravity CLI oficial
-       │                           │                           │
-       ├─ texto + IDs de anexos    ├─ SQLite + arquivos        └─ OAuth Google persistido
-       └─ recebe SSE               └─ fila/timeout/limpeza         em volume separado
+Aplicações / Clientes ──HTTPS/Bearer──> Fastify ──spawn(args[])──> Antigravity CLI oficial
+(Web, Mobile, MCP)          │                           │                           │
+                            ├─ texto + IDs de anexos    ├─ SQLite + arquivos        └─ OAuth Google persistido
+                            └─ recebe SSE               └─ fila/timeout/limpeza         em volume separado
 ```
 
-O servidor usa SQLite para conversas e histórico. Cada chamada cria uma execução headless do `agy` em modo `plan` + sandbox dentro da pasta isolada da conversa. Imagens do NumIA são salvas temporariamente e abertas pelo caminho absoluto isolado. A saída oficial `stream-json` (JSONL) é convertida em eventos SSE simples para o NumIA.
+O servidor usa SQLite para conversas e histórico. Cada chamada cria uma execução headless do `agy` em modo `plan` + sandbox dentro da pasta isolada da conversa. Imagens e arquivos são salvos temporariamente e abertos pelo caminho absoluto isolado. A saída oficial `stream-json` (JSONL) é convertida em eventos SSE simples para as aplicações clientes.
 
 Os endpoints OpenAI-compatible também aceitam Tool Calling/Function Calling. Quando o cliente envia `tools`, o backend usa saída estruturada do `agy`, valida nome e argumentos e retorna `assistant.tool_calls`; a execução continua sendo responsabilidade do cliente. Sem `tools`, o fluxo anterior de texto, streaming e imagens permanece o mesmo.
 
@@ -40,9 +40,11 @@ Alternativas:
 
 ### Opção automática para Windows
 
-Baixe ou clone o repositório em um computador Windows e execute `INSTALAR_AUTOMATICO.bat`. O assistente configura uma VM Linux já criada, gera chaves privadas, instala/inicia o Docker e conduz o login oficial do Google. Ele não cria recursos na Oracle e não modifica faturamento; a VM deve ter sido criada manualmente como Always Free.
+Baixe ou clone o repositório em um computador Windows e utilize os assistentes prontos:
 
-Se a instalação já existe e somente a sessão Google do servidor expirou, execute `RECONECTAR_AGY.bat`. Esse segundo assistente refaz apenas o login oficial do `agy`, reinicia o backend e testa a descoberta de modelos. Ele não altera `NUMIA_SERVER_TOKEN`, configuração do NumIA, autorização MCP, dados, volumes ou faturamento.
+- `INSTALAR_AUTOMATICO.bat`: Configura uma VM Linux já criada, gera chaves privadas, instala/inicia o Docker e conduz o login oficial do Google. Ele não cria recursos na Oracle e não modifica faturamento; a VM deve ter sido criada manualmente como Always Free.
+- `RECONECTAR_AGY.bat`: Refaz apenas o login oficial do `agy` caso a sessão Google expire, reinicia o backend e testa a descoberta de modelos. Ele não altera `NUMIA_SERVER_TOKEN`, autorização MCP, dados, volumes ou faturamento.
+- `CONTROLE_REMOTO_ORACLE.bat`: Verifica em tempo real o status e a conectividade do daemon de Controle Remoto do Antigravity na Oracle VM, garantindo que o `oracle-pc` esteja ativo e visível no painel oficial em `https://antigravity.google.com/`.
 
 ### Opção manual
 
@@ -69,7 +71,7 @@ O Antigravity CLI detecta SSH e oferece o fluxo manual oficial: mostra uma URL, 
 docker compose --profile login run --rm antigravity-login
 ```
 
-Abra a URL mostrada, entre com sua conta Google AI Pro e cole o código no terminal. Não use Selenium, cookies exportados, senha ou tokens no NumIA.
+Abra a URL mostrada, entre com sua conta Google AI Pro e cole o código no terminal. Não use Selenium, cookies exportados, senha ou tokens nas aplicações clientes.
 
 As credenciais ficam no volume `antigravity-auth`, montado em `/home/node/.gemini`, onde o CLI mantém seu estado. O backend testa a autenticação por `agy models` e nunca devolve credenciais.
 
@@ -127,11 +129,24 @@ Use um token de 32 caracteres ou mais. Em desenvolvimento, `REQUIRE_HTTPS` não 
 
 Veja o [guia rápido em português](docs/GUIA_RAPIDO.md), a [documentação da API](docs/API.md) e a [integração Android](docs/ANDROID.md).
 
-## Servidor MCP remoto
+## Duas Formas de Acesso Remoto
 
-Com `MCP_ENABLED=true`, o mesmo domínio também publica um endpoint Streamable HTTP em `https://SEU-DOMINIO/mcp`. Ele aceita a chave privada do NumIA como Bearer e também oferece OAuth 2.0 com cadastro dinâmico, PKCE e tela de autorização para clientes como Gemini Spark, Claude Desktop, Cursor, Zed e qualquer cliente compatível com MCP.
+O projeto disponibiliza **duas formas complementares** de integração e controle remoto do Antigravity CLI e dos seus modelos:
+
+### Opção 1: Servidor MCP Remoto (`https://SEU-DOMINIO/mcp`)
+
+Com `MCP_ENABLED=true`, o mesmo domínio publica um endpoint Streamable HTTP em `https://SEU-DOMINIO/mcp`. Ele aceita a chave privada do servidor como Bearer e também oferece OAuth 2.0 com cadastro dinâmico, PKCE e tela de autorização para clientes como Gemini Spark, Claude Desktop, Cursor, Zed e qualquer cliente compatível com MCP.
 
 O servidor oferece **30 ferramentas MCP**, combinando operações isoladas de workspace, catálogo completo de skills e uma **interface completa e segura para o Antigravity CLI (`agy`)**.
+
+### Opção 2: Google Antigravity Remote Control Oficial (`https://antigravity.google.com/`)
+
+Permite conectar e controlar suas sessões de agentes diretamente de **qualquer navegador web** (desktop ou mobile), sem a necessidade de softwares adicionais:
+
+1. **Acesso Direto**: Acesse [https://antigravity.google.com/](https://antigravity.google.com/) logado com sua conta Google AI Pro.
+2. **Instância Dedicada**: O servidor na nuvem aparece listado automaticamente sob **Remote Control Instances** como **`oracle-pc`** (🟢 Online), com o botão **Connect**.
+3. **Persistência via systemd**: O daemon do CLI roda como serviço nativo do sistema (`antigravity-cli-daemon.service`) com *linger* ativo (`loginctl enable-linger opc`) e montagem persistente em `/etc/fstab`, sobrevivendo a reinicializações e desconexões SSH.
+4. **Gerenciador 1-Clique no Windows**: Execute [CONTROLE_REMOTO_ORACLE.bat](CONTROLE_REMOTO_ORACLE.bat) na raiz do projeto para auditar o status do daemon em tempo real.
 
 ## Comandos MCP e Interface do Antigravity CLI
 
@@ -254,13 +269,13 @@ docker run --rm -v numia-gemini-server_numia-data:/source:ro -v "$PWD/backups:/b
   tar czf /backup/numia-data-$(date +%F).tgz -C /source .
 ```
 
-Para consistência máxima, pare o servidor durante a cópia ou use a API de backup do SQLite. O token do NumIA também não deve entrar no backup; ele permanece no `.env` da VM.
+Para consistência máxima, pare o servidor durante a cópia ou use a API de backup do SQLite. O token do servidor também não deve entrar no backup; ele permanece no `.env` da VM.
 
 ## Limitações importantes
 
 - A assinatura Google AI Pro controla acesso/quota do CLI, não garante que um nome específico de modelo esteja disponível.
-- O endpoint de status valida a sessão executando `agy models`; falhas de login são convertidas em `GEMINI_AUTH_REQUIRED` para manter compatibilidade com o NumIA.
-- O SSE usa POST. Se a conexão cair, o subprocesso é cancelado. O Android não deve reenviar automaticamente a mesma mensagem, pois isso criaria outro turno.
+- O endpoint de status valida a sessão executando `agy models`; falhas de login são convertidas em `GEMINI_AUTH_REQUIRED` para sinalizar a necessidade de reautenticação.
+- O SSE usa POST. Se a conexão cair, o subprocesso é cancelado. Os clientes não devem reenviar automaticamente a mesma mensagem sem necessidade, pois isso criaria outro turno.
 - Os arquivos expiram após `FILE_RETENTION_HOURS`; os registros de conversa/mensagem permanecem até a conversa ser excluída.
 - O backend analisa anexos. O modo `plan` impede mutações, mas o host ainda deve ser dedicado e sem outros dados sensíveis.
 
