@@ -10,7 +10,7 @@ FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production \
     DATA_DIR=/data \
     PATH=/home/node/.local/bin:$PATH
-RUN apt-get update && apt-get install -y --no-install-recommends bash ca-certificates curl ffmpeg git poppler-utils python3-minimal python3-pip \
+RUN apt-get update && apt-get install -y --no-install-recommends bash bubblewrap ca-certificates curl ffmpeg git poppler-utils python3-minimal python3-pip \
     && python3 -m pip install --break-system-packages --no-cache-dir genanki imageio openpyxl Pillow pypdf python-docx python-pptx reportlab \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /app /data /workspaces /home/node/.gemini \

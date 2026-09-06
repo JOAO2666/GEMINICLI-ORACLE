@@ -3,7 +3,7 @@ import { createInterface } from 'node:readline';
 import { AppError, publicProviderError } from '../errors.js';
 import type { AIProvider, ProviderEvent, ProviderMaintenance, ProviderRequest, ProviderResult, ProviderStatus } from '../types.js';
 import type { Config } from '../config.js';
-import { Semaphore } from './queue.js';
+import { MaintenanceLock, Semaphore } from './queue.js';
 import { parseJsonLine } from './stream-parser.js';
 
 type ChannelItem = { event: ProviderEvent } | { error: Error } | { done: true };
@@ -107,10 +107,21 @@ export function formatUsageBars(usageData: Record<string, unknown>): string {
   return sections.join('\n').trim();
 }
 
-function extractVersionWeight(name: string): number {
-  const matches = name.match(/\d+(?:\.\d+)?/g);
-  if (!matches) return 0;
-  return Number(matches[matches.length - 1] ?? 0) || 0;
+export function extractVersionTuple(name: string): number[] {
+  const matches = name.match(/(\d+(?:\.\d+)*)/g);
+  if (!matches || matches.length === 0) return [0];
+  const lastMatch = matches[matches.length - 1]!;
+  return lastMatch.split('.').map((p) => parseInt(p, 10) || 0);
+}
+
+export function compareVersionTuples(a: number[], b: number[]): number {
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    const valA = a[i] ?? 0;
+    const valB = b[i] ?? 0;
+    if (valA !== valB) return valA - valB;
+  }
+  return 0;
 }
 
 export function resolveModelAlias(
@@ -125,7 +136,37 @@ export function resolveModelAlias(
   const exact = availableModels.find((m) => m.toLowerCase() === clean);
   if (exact) return { model: exact };
 
-  // 2. Specific known shortcuts
+  const sortByVersionDesc = (models: string[]) =>
+    [...models].sort((a, b) => compareVersionTuples(extractVersionTuple(b), extractVersionTuple(a)));
+
+  // 2. Generic "latest" aliases
+  if (clean === 'latest' || clean === 'auto') {
+    if (defaultModel && availableModels.includes(defaultModel)) return { model: defaultModel };
+    const sorted = sortByVersionDesc(availableModels);
+    return sorted.length > 0 ? { model: sorted[0] } : {};
+  }
+  if (clean === 'latest-flash') {
+    const candidates = availableModels.filter((m) => /flash/i.test(m));
+    const sorted = sortByVersionDesc(candidates);
+    return sorted.length > 0 ? { model: sorted[0] } : {};
+  }
+  if (clean === 'latest-pro') {
+    const candidates = availableModels.filter((m) => /pro/i.test(m));
+    const sorted = sortByVersionDesc(candidates);
+    return sorted.length > 0 ? { model: sorted[0] } : {};
+  }
+  if (clean === 'latest-sonnet') {
+    const candidates = availableModels.filter((m) => /sonnet/i.test(m));
+    const sorted = sortByVersionDesc(candidates);
+    return sorted.length > 0 ? { model: sorted[0] } : {};
+  }
+  if (clean === 'latest-opus') {
+    const candidates = availableModels.filter((m) => /opus/i.test(m));
+    const sorted = sortByVersionDesc(candidates);
+    return sorted.length > 0 ? { model: sorted[0] } : {};
+  }
+
+  // 3. Specific known shortcuts
   if (clean === 'flash' || clean === 'gemini-flash') {
     const candidates = availableModels.filter((m) => /flash/i.test(m));
     if (candidates.length === 1) return { model: candidates[0] };
@@ -133,8 +174,7 @@ export function resolveModelAlias(
       const highCandidates = candidates.filter((m) => /-high$/i.test(m));
       const pool = highCandidates.length > 0 ? highCandidates : candidates;
       if (defaultModel && pool.includes(defaultModel)) return { model: defaultModel };
-      pool.sort((a, b) => extractVersionWeight(b) - extractVersionWeight(a));
-      return { model: pool[0] };
+      return { model: sortByVersionDesc(pool)[0] };
     }
   }
 
@@ -145,8 +185,7 @@ export function resolveModelAlias(
       const highCandidates = candidates.filter((m) => /-high$/i.test(m));
       const pool = highCandidates.length > 0 ? highCandidates : candidates;
       if (defaultModel && pool.includes(defaultModel)) return { model: defaultModel };
-      pool.sort((a, b) => extractVersionWeight(b) - extractVersionWeight(a));
-      return { model: pool[0] };
+      return { model: sortByVersionDesc(pool)[0] };
     }
   }
 
@@ -155,8 +194,7 @@ export function resolveModelAlias(
     const candidates = availableModels.filter((m) => /flash/i.test(m) && m.toLowerCase().endsWith(`-${tier}`));
     if (candidates.length === 1) return { model: candidates[0] };
     if (candidates.length > 1) {
-      candidates.sort((a, b) => extractVersionWeight(b) - extractVersionWeight(a));
-      return { model: candidates[0] };
+      return { model: sortByVersionDesc(candidates)[0] };
     }
   }
 
@@ -164,8 +202,7 @@ export function resolveModelAlias(
     const candidates = availableModels.filter((m) => /sonnet/i.test(m));
     if (candidates.length === 1) return { model: candidates[0] };
     if (candidates.length > 1) {
-      candidates.sort((a, b) => extractVersionWeight(b) - extractVersionWeight(a));
-      return { model: candidates[0] };
+      return { model: sortByVersionDesc(candidates)[0] };
     }
   }
 
@@ -173,12 +210,11 @@ export function resolveModelAlias(
     const candidates = availableModels.filter((m) => /opus/i.test(m));
     if (candidates.length === 1) return { model: candidates[0] };
     if (candidates.length > 1) {
-      candidates.sort((a, b) => extractVersionWeight(b) - extractVersionWeight(a));
-      return { model: candidates[0] };
+      return { model: sortByVersionDesc(candidates)[0] };
     }
   }
 
-  // 3. Substring search
+  // 4. Substring search
   const substringMatches = availableModels.filter((m) => m.toLowerCase().includes(clean));
   if (substringMatches.length === 1) return { model: substringMatches[0] };
   if (substringMatches.length > 1) return { ambiguous: substringMatches };
@@ -204,6 +240,7 @@ export function buildAntigravityArgs(request: ProviderRequest, timeoutMs: number
 
 export class AntigravityCLIProvider implements AIProvider {
   private readonly semaphore: Semaphore;
+  private readonly maintenanceLock = new MaintenanceLock();
   private readonly active = new Map<string, AbortController>();
   private readonly catalogUpdateListeners: Array<() => void> = [];
   private modelCache: string[] = [];
@@ -213,7 +250,11 @@ export class AntigravityCLIProvider implements AIProvider {
   private lastMaintenance: ProviderMaintenance = {};
 
   constructor(private readonly config: Config) {
-    this.semaphore = new Semaphore(config.MAX_GEMINI_PROCESSES);
+    this.semaphore = new Semaphore(
+      config.MAX_GEMINI_PROCESSES,
+      config.MAX_QUEUE_DEPTH,
+      config.QUEUE_WAIT_TIMEOUT_MS
+    );
   }
 
   onCatalogUpdate(listener: () => void): void {
@@ -267,26 +308,31 @@ export class AntigravityCLIProvider implements AIProvider {
 
   async updateCLI(): Promise<ProviderMaintenance> {
     if (this.updatePromise) return this.updatePromise;
-    if (this.active.size > 0) {
+    if (this.maintenanceLock.isUpdating || this.active.size > 0) {
       return { ...this.lastMaintenance, skipped: true, message: 'Atualização adiada: há gerações em andamento.' };
     }
     this.updatePromise = (async () => {
-      const before = await this.run(['--version'], 10_000);
-      const update = await this.run(['update'], 120_000);
-      const after = await this.run(['--version'], 10_000);
-      const beforeVersion = before?.stdout.trim();
-      const installedVersion = after?.stdout.trim() || beforeVersion;
-      const status: ProviderMaintenance = {
-        previousVersion: beforeVersion,
-        installedVersion,
-        updated: Boolean(beforeVersion && installedVersion && beforeVersion !== installedVersion),
-        skipped: false,
-        message: update?.code === 0 ? 'Verificação de atualização concluída.' : 'Não foi possível atualizar o CLI; a versão instalada foi mantida.',
-        modelsUpdated: update?.code === 0
-      };
-      this.lastMaintenance = { ...this.lastMaintenance, ...status };
-      await this.refreshModels(true);
-      return { ...this.lastMaintenance };
+      const releaseLock = await this.maintenanceLock.acquireExclusive();
+      try {
+        const before = await this.run(['--version'], 10_000);
+        const update = await this.run(['update'], 120_000);
+        const after = await this.run(['--version'], 10_000);
+        const beforeVersion = before?.stdout.trim();
+        const installedVersion = after?.stdout.trim() || beforeVersion;
+        const status: ProviderMaintenance = {
+          previousVersion: beforeVersion,
+          installedVersion,
+          updated: Boolean(beforeVersion && installedVersion && beforeVersion !== installedVersion),
+          skipped: false,
+          message: update?.code === 0 ? 'Verificação de atualização concluída.' : 'Não foi possível atualizar o CLI; a versão instalada foi mantida.',
+          modelsUpdated: update?.code === 0
+        };
+        this.lastMaintenance = { ...this.lastMaintenance, ...status };
+        await this.refreshModels(true);
+        return { ...this.lastMaintenance };
+      } finally {
+        releaseLock();
+      }
     })().finally(() => { this.updatePromise = undefined; });
     return this.updatePromise;
   }
@@ -349,9 +395,11 @@ export class AntigravityCLIProvider implements AIProvider {
     const forwardAbort = () => controller.abort();
     request.signal?.addEventListener('abort', forwardAbort, { once: true });
     this.active.set(request.conversationId, controller);
+    let releaseShared: (() => void) | undefined;
     let release: (() => void) | undefined;
 
     try {
+      releaseShared = await this.maintenanceLock.acquireShared();
       release = await this.semaphore.acquire(controller.signal);
       const args = buildAntigravityArgs(request, this.config.AGY_TIMEOUT_MS);
       const channel = new AsyncChannel();
@@ -438,6 +486,7 @@ export class AntigravityCLIProvider implements AIProvider {
       }
     } finally {
       release?.();
+      releaseShared?.();
       this.active.delete(request.conversationId);
       request.signal?.removeEventListener('abort', forwardAbort);
     }

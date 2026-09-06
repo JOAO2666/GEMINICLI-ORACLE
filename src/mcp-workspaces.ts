@@ -5,6 +5,7 @@ import type { Config } from './config.js';
 import { AppError } from './errors.js';
 import type { AIProvider } from './types.js';
 import { resolveModelAlias } from './services/antigravity-provider.js';
+import { detectMimeType, signArtifactUrl, validateArtifactFile } from './services/artifact-service.js';
 
 export interface WorkspaceExecutionMetrics {
   timestamp: string;
@@ -613,15 +614,39 @@ export class McpWorkspaceService {
     const { target } = await this.safePath(workspaceId, relativePath);
     const stat = await fs.stat(target).catch(() => null);
     if (!stat?.isFile()) throw new AppError(404, 'FILE_NOT_FOUND', 'Arquivo não encontrado.');
-    if (stat.size > 100 * 1024 * 1024) throw new AppError(413, 'ARTIFACT_TOO_LARGE', 'Artefato maior que 100 MB.');
-    const artifactId = crypto.randomUUID();
+    if (stat.size > this.config.MAX_ARTIFACT_BYTES) throw new AppError(413, 'ARTIFACT_TOO_LARGE', 'Artefato excede o limite máximo configurado.');
+
     const name = cleanName(path.basename(target), 'artifact.bin');
+    const validation = await validateArtifactFile(target, name);
+    if (!validation.valid) {
+      throw new AppError(422, 'INVALID_ARTIFACT', `Validação do artefato falhou: ${validation.error ?? 'arquivo corrompido ou formato inválido'}`);
+    }
+
+    const artifactId = crypto.randomUUID();
     const destination = path.join(this.artifactsRoot, workspaceId, artifactId, name);
     await fs.mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
     await fs.copyFile(target, destination);
+
+    const signed = signArtifactUrl({
+      baseUrl: this.publicBaseUrl(),
+      workspaceId,
+      artifactId,
+      filename: name,
+      secretKey: this.config.artifactSigningKey,
+      ttlSeconds: this.config.ARTIFACT_RETENTION_HOURS * 3600
+    });
+
     return {
-      workspaceId, artifactId, name, size: stat.size,
-      url: `${this.publicBaseUrl()}/artifacts/${workspaceId}/${artifactId}/${encodeURIComponent(name)}`
+      workspaceId,
+      artifactId,
+      name,
+      size: stat.size,
+      mimeType: validation.mimeType,
+      sha256: validation.sha256,
+      url: signed.url,
+      downloadUrl: signed.url,
+      expiresAt: signed.expiresAt,
+      ...(validation.pageCount ? { pageCount: validation.pageCount } : {})
     };
   }
 
@@ -635,9 +660,23 @@ export class McpWorkspaceService {
         if (!fileEntry.isFile()) continue;
         const full = path.join(root, idEntry.name, fileEntry.name);
         const stat = await fs.stat(full);
+        const signed = signArtifactUrl({
+          baseUrl: this.publicBaseUrl(),
+          workspaceId,
+          artifactId: idEntry.name,
+          filename: fileEntry.name,
+          secretKey: this.config.artifactSigningKey,
+          ttlSeconds: this.config.ARTIFACT_RETENTION_HOURS * 3600
+        });
         artifacts.push({
-          artifactId: idEntry.name, name: fileEntry.name, size: stat.size, createdAt: stat.birthtime.toISOString(),
-          url: `${this.publicBaseUrl()}/artifacts/${workspaceId}/${idEntry.name}/${encodeURIComponent(fileEntry.name)}`
+          artifactId: idEntry.name,
+          name: fileEntry.name,
+          size: stat.size,
+          mimeType: detectMimeType(fileEntry.name),
+          createdAt: stat.birthtime.toISOString(),
+          url: signed.url,
+          downloadUrl: signed.url,
+          expiresAt: signed.expiresAt
         });
       }
     }
@@ -652,5 +691,199 @@ export class McpWorkspaceService {
     const stat = await fs.stat(target).catch(() => null);
     if (!stat?.isFile()) throw new AppError(404, 'ARTIFACT_NOT_FOUND', 'Artefato não encontrado.');
     return target;
+  }
+
+  async artifactCreate(params: {
+    request: string;
+    format?: 'auto' | 'pdf' | 'docx' | 'xlsx' | 'pptx' | 'apkg';
+    filename?: string;
+    workspace_id?: string;
+    model?: string;
+    effort?: 'low' | 'medium' | 'high';
+  }): Promise<Record<string, unknown>> {
+    let fmt = params.format ?? 'auto';
+    if (fmt === 'auto') {
+      const lower = params.request.toLowerCase();
+      if (/(\bpdf\b|\.pdf)/i.test(lower)) fmt = 'pdf';
+      else if (/(\bdocx\b|\bword\b|\.docx)/i.test(lower)) fmt = 'docx';
+      else if (/(\bxlsx\b|\bexcel\b|\bplanilha\b|\btabela\b|\.xlsx)/i.test(lower)) fmt = 'xlsx';
+      else if (/(\bpptx\b|\bpowerpoint\b|\bslides?\b|\bapresenta[çc][ãa]o\b|\.pptx)/i.test(lower)) fmt = 'pptx';
+      else if (/(\bapkg\b|\banki\b|\bflashcards?\b|\.apkg)/i.test(lower)) fmt = 'apkg';
+      else fmt = 'pdf';
+    }
+
+    const skillMap: Record<string, string> = {
+      pdf: 'document-pdf',
+      docx: 'document-docx',
+      xlsx: 'document-xlsx',
+      pptx: 'document-pptx',
+      apkg: 'anki-apkg'
+    };
+    const targetSkill = skillMap[fmt] || 'document-pdf';
+
+    let workspaceId = params.workspace_id;
+    if (!workspaceId) {
+      const wsName = params.filename ? `Artifact - ${params.filename}` : `Artifact - ${fmt.toUpperCase()}`;
+      const ws = await this.create(wsName);
+      workspaceId = String(ws.id);
+    }
+    const root = await this.workspaceRoot(workspaceId);
+
+    // Ensure skill is installed
+    await this.installCatalogSkills(workspaceId, [targetSkill], false).catch(() => undefined);
+
+    let outName = params.filename ? cleanName(path.basename(params.filename), `artifact.${fmt}`) : `documento.${fmt}`;
+    if (!outName.toLowerCase().endsWith(`.${fmt}`)) {
+      outName = `${outName}.${fmt}`;
+    }
+
+    const goal = [
+      `Crie o documento ou artefato solicitado: "${params.request}"`,
+      `Formato obrigatório: ${fmt.toUpperCase()}`,
+      `Arquivo final deve ser salvo exatamente em: ${outName}`,
+      `Consulte as instruções e scripts da skill em .agents/skills/${targetSkill}/SKILL.md para gerar o arquivo corretamente.`,
+      `Certifique-se de que o arquivo ${outName} seja gerado com sucesso e não esteja vazio.`
+    ].join('\n');
+
+    await this.goalRun(workspaceId, goal, params.model, params.effort ?? 'high');
+
+    let candidatePath = path.join(root, outName);
+    let stat = await fs.stat(candidatePath).catch(() => null);
+    if (!stat || !stat.isFile()) {
+      const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+      const matched = entries.find((e) => e.isFile() && e.name.toLowerCase().endsWith(`.${fmt}`));
+      if (matched) {
+        candidatePath = path.join(root, matched.name);
+        outName = matched.name;
+        stat = await fs.stat(candidatePath).catch(() => null);
+      }
+    }
+
+    if (!stat || !stat.isFile()) {
+      throw new AppError(500, 'ARTIFACT_GENERATION_FAILED', `O agente concluiu o objetivo mas o arquivo ${outName} não foi encontrado no workspace.`);
+    }
+
+    const published = await this.publishArtifact(workspaceId, outName);
+    return {
+      success: true,
+      workspaceId,
+      artifactId: published.artifactId,
+      filename: outName,
+      mimeType: published.mimeType,
+      size: published.size,
+      sha256: published.sha256,
+      url: published.url,
+      downloadUrl: published.downloadUrl,
+      expiresAt: published.expiresAt
+    };
+  }
+
+  async taskRun(params: {
+    request: string;
+    workspace_id?: string;
+    repository_url?: string;
+    ref?: string;
+    model?: string;
+    effort?: 'low' | 'medium' | 'high';
+  }): Promise<Record<string, unknown>> {
+    let workspaceId = params.workspace_id;
+    if (!workspaceId) {
+      const ws = await this.create('Task Workspace');
+      workspaceId = String(ws.id);
+    }
+
+    if (params.repository_url) {
+      await this.gitClone(workspaceId, params.repository_url, 'repo', params.ref).catch(() => undefined);
+    }
+
+    const goalResult = await this.goalRun(workspaceId, params.request, params.model, params.effort ?? 'high');
+    const files = await this.listFiles(workspaceId, '.', true);
+    const artifacts = await this.listArtifacts(workspaceId);
+
+    return {
+      success: true,
+      workspaceId,
+      model: goalResult.model,
+      durationSeconds: goalResult.durationSeconds,
+      summary: goalResult.response,
+      filesCount: Array.isArray(files.entries) ? files.entries.length : 0,
+      artifacts: artifacts.artifacts
+    };
+  }
+
+  async artifactRevise(params: {
+    workspace_id: string;
+    instructions: string;
+    artifact_name?: string;
+    model?: string;
+    effort?: 'low' | 'medium' | 'high';
+  }): Promise<Record<string, unknown>> {
+    const root = await this.workspaceRoot(params.workspace_id);
+    const goal = [
+      `Revise o documento/artefato com as seguintes instruções: "${params.instructions}"`,
+      params.artifact_name ? `Artefato específico a revisar: ${params.artifact_name}` : 'Atualize o documento correspondente.',
+      'Mantenha as alterações consistentes e certifique-se de salvar a versão atualizada.'
+    ].join('\n');
+
+    await this.goalRun(params.workspace_id, goal, params.model, params.effort ?? 'high');
+
+    let targetName = params.artifact_name;
+    if (!targetName) {
+      const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+      const doc = entries.find((e) => e.isFile() && /\.(pdf|docx|xlsx|pptx|apkg|html|md|txt)$/i.test(e.name));
+      if (doc) targetName = doc.name;
+    }
+
+    if (!targetName) {
+      throw new AppError(404, 'ARTIFACT_NOT_FOUND', 'Nenhum documento encontrado para publicar como revisão.');
+    }
+
+    const published = await this.publishArtifact(params.workspace_id, targetName);
+    return {
+      success: true,
+      workspaceId: params.workspace_id,
+      artifactId: published.artifactId,
+      filename: published.name,
+      mimeType: published.mimeType,
+      size: published.size,
+      sha256: published.sha256,
+      url: published.url,
+      downloadUrl: published.downloadUrl,
+      expiresAt: published.expiresAt
+    };
+  }
+
+  async artifactGet(workspaceId: string, artifactId: string): Promise<Record<string, unknown>> {
+    if (!workspaceIdPattern.test(workspaceId) || !workspaceIdPattern.test(artifactId)) {
+      throw new AppError(400, 'INVALID_ID', 'ID de workspace ou artefato inválido.');
+    }
+    const root = path.join(this.artifactsRoot, workspaceId, artifactId);
+    const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+    const file = entries.find((e) => e.isFile());
+    if (!file) throw new AppError(404, 'ARTIFACT_NOT_FOUND', 'Artefato não encontrado.');
+
+    const filePath = path.join(root, file.name);
+    const stat = await fs.stat(filePath);
+    const mimeType = detectMimeType(file.name);
+
+    const signed = signArtifactUrl({
+      baseUrl: this.publicBaseUrl(),
+      workspaceId,
+      artifactId,
+      filename: file.name,
+      secretKey: this.config.artifactSigningKey,
+      ttlSeconds: this.config.ARTIFACT_RETENTION_HOURS * 3600
+    });
+
+    return {
+      workspaceId,
+      artifactId,
+      name: file.name,
+      size: stat.size,
+      mimeType,
+      url: signed.url,
+      downloadUrl: signed.url,
+      expiresAt: signed.expiresAt
+    };
   }
 }

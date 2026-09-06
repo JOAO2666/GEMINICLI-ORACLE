@@ -24,6 +24,7 @@ import { McpAuthStore } from './mcp-auth.js';
 import { mcpPublicUrls, registerMcpOAuthRoutes } from './mcp-oauth-routes.js';
 import { createWorkspaceMcpEndpoint, type McpEndpoint } from './mcp-server.js';
 import { McpWorkspaceService } from './mcp-workspaces.js';
+import { detectMimeType, verifyArtifactUrl } from './services/artifact-service.js';
 
 function tokenMatches(header: string | undefined, expected: string): boolean {
   if (!header?.startsWith('Bearer ')) return false;
@@ -130,6 +131,46 @@ export async function buildApp(
   });
 
   app.get('/health', async () => ({ status: 'ok' }));
+  app.get('/health/live', async () => ({ status: 'ok', uptime: process.uptime() }));
+  app.get('/health/ready', async (request, reply) => {
+    try {
+      db.listConversations();
+      const auth = await provider.checkAuthentication().catch(() => ({ available: false, authenticated: false }));
+      let workerHealth: Record<string, unknown> | null = null;
+      if (config.MCP_WORKER_URL && config.MCP_WORKER_TOKEN) {
+        try {
+          const res = await fetch(`${config.MCP_WORKER_URL}/health`, {
+            headers: { authorization: `Bearer ${config.MCP_WORKER_TOKEN}` },
+            signal: AbortSignal.timeout(3000)
+          });
+          if (res.ok) {
+            workerHealth = await res.json().catch(() => null) as Record<string, unknown> | null;
+          }
+        } catch {
+          workerHealth = { status: 'unreachable' };
+        }
+      }
+
+      if (config.MCP_WORKER_ISOLATION === 'strict' && workerHealth && workerHealth.isolation === 'failed') {
+        return reply.code(503).send({
+          status: 'unhealthy',
+          error: 'Mecanismo de sandbox estrito do worker falhou ao inicializar.',
+          worker: workerHealth
+        });
+      }
+
+      return reply.send({
+        status: 'ok',
+        database: 'ok',
+        provider: auth.available ? (auth.authenticated ? 'ok' : 'unauthenticated') : 'unavailable',
+        worker: workerHealth ?? 'unconfigured',
+        uptime: process.uptime()
+      });
+    } catch (error) {
+      return reply.code(503).send({ status: 'unhealthy', error: (error as Error).message });
+    }
+  });
+
   if (mcpEndpoint && mcpWorkspaces) {
     const endpoint = mcpEndpoint;
     const workspaces = mcpWorkspaces;
@@ -143,10 +184,29 @@ export async function buildApp(
     });
     app.get('/artifacts/:workspaceId/:artifactId/:name', async (request, reply) => {
       const params = request.params as { workspaceId: string; artifactId: string; name: string };
+      const query = request.query as { expires?: string; sig?: string };
+
+      if (query.expires && query.sig) {
+        const verify = verifyArtifactUrl({
+          workspaceId: params.workspaceId,
+          artifactId: params.artifactId,
+          filename: params.name,
+          expires: query.expires,
+          sig: query.sig,
+          secretKey: config.artifactSigningKey
+        });
+        if (!verify.valid) {
+          const status = verify.reason === 'EXPIRED' ? 410 : 403;
+          const msg = verify.reason === 'EXPIRED' ? 'Link de download expirado.' : 'Assinatura inválida.';
+          return reply.code(status).send({ error: verify.reason, message: msg });
+        }
+      }
+
       const filePath = await workspaces.artifactPath(params.workspaceId, params.artifactId, params.name);
+      const mime = detectMimeType(params.name);
       reply.header('Cache-Control', 'private, max-age=86400');
       reply.header('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(path.basename(filePath))}`);
-      return reply.type('application/octet-stream').send(createReadStream(filePath));
+      return reply.type(mime).send(createReadStream(filePath));
     });
   }
   app.get('/api/provider/status', async () => provider.checkAuthentication());

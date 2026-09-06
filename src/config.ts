@@ -38,6 +38,14 @@ const envSchema = z.object({
   MAX_HISTORY_CHARS: positiveInt(120_000),
   RATE_LIMIT_MAX: positiveInt(60),
   RATE_LIMIT_WINDOW: z.string().default('1 minute'),
+  MAX_QUEUE_DEPTH: positiveInt(50),
+  QUEUE_WAIT_TIMEOUT_MS: positiveInt(60_000),
+  ARTIFACT_SIGNING_KEY: z.string().default(''),
+  ARTIFACT_RETENTION_HOURS: positiveInt(72),
+  MAX_ARTIFACT_BYTES: positiveInt(100 * 1024 * 1024),
+  MAX_TOTAL_ARTIFACT_BYTES: positiveInt(5 * 1024 * 1024 * 1024),
+  MAX_WORKSPACE_BYTES: positiveInt(500 * 1024 * 1024),
+  MCP_WORKER_ISOLATION: z.enum(['strict', 'compat']).default('compat'),
   TRUST_PROXY: bool,
   REQUIRE_HTTPS: bool
 });
@@ -54,10 +62,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   if (allowedModels.length > 0 && !allowedModels.includes(visionModel)) {
     throw new Error('VISION_MODEL precisa estar em ALLOWED_MODELS');
   }
+  const artifactSigningKey = parsed.ARTIFACT_SIGNING_KEY ||
+    (parsed.NUMIA_SERVER_TOKEN ? `sig-${parsed.NUMIA_SERVER_TOKEN.slice(0, 32)}` : 'numia-default-artifact-key');
+
   return {
     ...parsed,
     allowedModels,
     visionModel,
+    artifactSigningKey,
     allowedOrigins: parsed.ALLOWED_ORIGINS.split(',').map((v) => v.trim()).filter(Boolean),
     dataDir: path.resolve(parsed.DATA_DIR),
     skillCatalogDir: path.resolve(parsed.SKILL_CATALOG_DIR),

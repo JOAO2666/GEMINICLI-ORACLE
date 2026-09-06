@@ -207,9 +207,26 @@ Além do protocolo MCP, o servidor expõe rotas HTTP protegidas por token Bearer
 
 ---
 
-### Ferramentas de Workspace e Skills
+### Agent Orchestrator (Novas Ferramentas High-Level)
 
-As 19 ferramentas de workspace existentes continuam totalmente operacionais: `workspace_create`, `workspace_delete`, `workspace_info`, `file_list`, `file_read`, `file_write`, `file_edit`, `shell_execute`, `git_clone`, `goal_run`, `skill_list`, `skill_catalog`, `skill_read`, `skill_resources`, `skill_install`, `skill_install_catalog`, `skill_remove`, `artifact_list` e `artifact_publish`.
+Para que clientes como **YhikkaHub** e **Gemini Spark** criem documentos e executem tarefas completas em uma única chamada de linguagem natural sem encadear dezenas de ferramentas manuais, foram adicionadas 4 ferramentas orquestradoras de alto nível:
+
+1. **`artifact_create`**: Recebe um pedido ("Faça um PDF sobre...", "Crie um documento Word", "Crie uma planilha de gastos", "Faça uma apresentação de slides", "Crie 100 flashcards para o Anki"). Detecta deterministicamente o formato (`pdf`, `docx`, `xlsx`, `pptx`, `apkg`), cria ou reutiliza o workspace, instala a skill necessária (`document-pdf`, `document-docx`, `document-xlsx`, `document-pptx`, `anki-apkg`), executa o agente, valida a integridade do arquivo antes de publicar e retorna os metadados com URL assinada.
+2. **`task_run`**: Orquestrador para tarefas complexas de desenvolvimento e análise. Cria/reutiliza workspace, clona repositório se solicitado, executa objetivo, roda verificações e sumariza alterações.
+3. **`artifact_revise`**: Continua trabalhando sobre um artefato já gerado, aplicando alterações solicitadas pelo usuário.
+4. **`artifact_get`**: Recupera metadados detalhados de um artefato e gera uma nova URL de download assinada com expiração atualizada.
+
+---
+
+### Ferramentas de Workspace e Skills (Total: 34 ferramentas MCP)
+
+Todas as ferramentas low-level originais permanecem 100% disponíveis com contratos estritos inalterados:
+- **Workspaces**: `workspace_create`, `workspace_delete`, `workspace_info`
+- **Arquivos**: `file_list`, `file_read`, `file_write`, `file_edit`
+- **Execução e Autonomia**: `shell_execute`, `git_clone`, `goal_run`
+- **Skills**: `skill_list`, `skill_catalog`, `skill_read`, `skill_resources`, `skill_install`, `skill_install_catalog`, `skill_remove`
+- **Artefatos**: `artifact_list`, `artifact_publish`, `artifact_create`, `task_run`, `artifact_revise`, `artifact_get`
+- **Modelos e Status**: `models`, `model_current`, `model_set`, `status`, `usage`, `usage_last`, `commands`, `cli_help`, `cli_execute`, `cli_history`, `cli_update`
 
 O catálogo incluído instala automaticamente 18 skills em cada workspace: 13 skills oficiais da Anthropic sob Apache 2.0 e cinco skills independentes do NumIA para Anki/APKG, PDF, DOCX, XLSX e PPTX. Skills oficiais com licença restrita ao uso de serviços Anthropic não são redistribuídas. A origem, o commit auditado e todas as exclusões ficam documentados em [`skill-catalog/CATALOG.json`](skill-catalog/CATALOG.json).
 
@@ -220,13 +237,16 @@ O catálogo incluído instala automaticamente 18 skills em cada workspace: 13 sk
 - O caminho canônico é `.agents/skills/<nome>/SKILL.md`, compatível com Antigravity; o caminho legado `.skills` permanece legível.
 - `MCP_AUTO_INSTALL_SKILLS=true` instala o catálogo em workspaces novos e completa workspaces existentes na inicialização.
 
-- Arquivos e comandos ficam em workspaces dedicados no volume `mcp-workspaces`.
-- Comandos rodam em um serviço separado, sem o volume das credenciais Google e com limites de memória, processos, tempo e saída.
-- Exclusão de workspace move os dados para uma lixeira recuperável.
-- `git_clone` aceita somente repositórios públicos HTTPS do GitHub.
-- Artefatos publicados recebem URLs HTTPS com identificadores aleatórios.
-- Clientes compatíveis devem solicitar confirmação do usuário antes das ferramentas marcadas como escrita ou destrutivas.
-- Skills adaptadas nunca autorizam APIs Anthropic/OpenAI nem outros serviços pagos; `goal_run` recebe uma regra explícita para usar somente o login Google já configurado e ferramentas locais gratuitas.
+### Segurança, Isolamento e Validação de Artefatos
+
+- **Validação de Integridade**: Antes da publicação de artefatos, PDFs são validados verificando assinatura `%PDF-`, finalizadores `%%EOF` e contagem de páginas; documentos Office (DOCX, XLSX, PPTX) e APKG são validados quanto à integridade do arquivo compactado e descritores essenciais.
+- **Download Seguro com URLs Assinadas**: Os links de download (`/artifacts/:workspaceId/:artifactId/:filename?expires=...&sig=...`) usam HMAC-SHA256 e comparação em tempo constante (`timingSafeEqual`), permitindo abrir diretamente no navegador ou clientes sem exigir headers de autenticação adicionais, mas expirando após o prazo configurado.
+- **Isolamento de Workspaces**: Traversal de caminhos (`..`, `/`, `\`) é bloqueado com verificação canônica estrita. No executor (`worker-server`), cada execução recebe um diretório temporário isolado (`TMPDIR`/`HOME`) que é destruído ao final. Em Linux, o isolamento com `bubblewrap` isola o volume `/workspaces` garantindo que o Workspace A não enxergue nem acesse arquivos do Workspace B.
+- **`MCP_WORKER_ISOLATION`**: Modo `compat` (padrão) ou `strict`. No modo `strict`, o servidor valida a disponibilidade do mecanismo de sandbox e, caso não esteja disponível, reporta o estado degradado em `/health/ready` e rejeita comandos não isolados com 503.
+- **Fila Concorrente Delimitada**: O semáforo de requisições conta com `MAX_QUEUE_DEPTH` (retornando 429 QUEUE_FULL em sobrecarga) e `QUEUE_WAIT_TIMEOUT_MS` (retornando 504 QUEUE_TIMEOUT).
+- **Maintenance Lock**: Leituras/inferências adquirem lock compartilhado, enquanto a atualização do CLI (`agy update`) adquire lock exclusivo, impedindo que atualizações ocorram durante gerações ativas.
+- **Model Versioning e Aliases**: Comparação de versões numéricas por tuplas (`3.10 > 3.9`) e aliases dinâmicos (`latest`, `latest-flash`, `latest-pro`, `latest-sonnet`, `latest-opus`).
+- **Observabilidade**: Endpoints `GET /health` (básico), `GET /health/live` (processo) e `GET /health/ready` (prontidão do banco, autenticação Google e worker sandbox).
 
 Defina `MCP_WORKER_TOKEN` com outro valor aleatório de pelo menos 32 caracteres; ele deve ser diferente de `NUMIA_SERVER_TOKEN` e nunca deve ser enviado ao aplicativo ou versionado.
 

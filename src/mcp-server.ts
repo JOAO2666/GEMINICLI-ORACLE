@@ -92,10 +92,12 @@ export function createWorkspaceMcpEndpoint(
 
     server.registerTool('file_write', {
       title: 'Criar arquivo',
-      description: 'Cria ou sobrescreve, quando autorizado, um arquivo de texto dentro do workspace.',
+      description: 'Cria ou sobrescreve um arquivo de texto dentro do workspace. Primitiva low-level de escrita de texto. Não use para gerar artefatos binários como PDF/DOCX/XLSX diretamente (use artifact_create).',
       inputSchema: z.object({
-        workspace_id: z.string().uuid(), path: z.string().min(1).max(500),
-        content: z.string().max(1_048_576), overwrite: z.boolean().default(false)
+        workspace_id: z.string().uuid().describe('ID do workspace'),
+        path: z.string().min(1).max(500).describe('Caminho relativo do arquivo dentro do workspace'),
+        content: z.string().max(1_048_576).describe('Conteúdo de texto'),
+        overwrite: z.boolean().default(false).describe('Sobrescrever caso já exista')
       }),
       annotations: localWrite
     }, ({ workspace_id, path, content, overwrite }) => guarded(() => workspaces.writeFile(workspace_id, path, content, overwrite)));
@@ -104,9 +106,11 @@ export function createWorkspaceMcpEndpoint(
       title: 'Editar arquivo',
       description: 'Substitui texto exato em um arquivo. Recusa edições ambíguas por padrão.',
       inputSchema: z.object({
-        workspace_id: z.string().uuid(), path: z.string().min(1).max(500),
-        old_text: z.string().min(1).max(1_048_576), new_text: z.string().max(1_048_576),
-        replace_all: z.boolean().default(false)
+        workspace_id: z.string().uuid().describe('ID do workspace'),
+        path: z.string().min(1).max(500).describe('Caminho relativo do arquivo'),
+        old_text: z.string().min(1).max(1_048_576).describe('Texto exato a ser substituído'),
+        new_text: z.string().max(1_048_576).describe('Novo texto'),
+        replace_all: z.boolean().default(false).describe('Substituir todas as ocorrências')
       }),
       annotations: localWrite
     }, ({ workspace_id, path, old_text, new_text, replace_all }) =>
@@ -114,10 +118,11 @@ export function createWorkspaceMcpEndpoint(
 
     server.registerTool('shell_execute', {
       title: 'Executar comando isolado',
-      description: 'Executa um comando em um contêiner isolado, limitado ao workspace e sem credenciais do servidor. Use para instalar dependências, testar e compilar.',
+      description: 'Executa um comando em um contêiner isolado, limitado ao workspace e sem credenciais do servidor. Ferramenta low-level para build, testes e compilação; prefira ferramentas de alto nível (artifact_create, task_run) quando disponíveis.',
       inputSchema: z.object({
-        workspace_id: z.string().uuid(), command: z.string().min(1).max(4_000),
-        timeout_seconds: z.number().int().min(1).max(60).default(60)
+        workspace_id: z.string().uuid().describe('ID do workspace'),
+        command: z.string().min(1).max(4_000).describe('Comando bash a ser executado'),
+        timeout_seconds: z.number().int().min(1).max(60).default(60).describe('Tempo limite em segundos')
       }),
       annotations: openWorld
     }, ({ workspace_id, command, timeout_seconds }) => guarded(() => workspaces.shellExecute(workspace_id, command, timeout_seconds)));
@@ -126,8 +131,10 @@ export function createWorkspaceMcpEndpoint(
       title: 'Clonar repositório GitHub',
       description: 'Clona um repositório público HTTPS do GitHub dentro do workspace usando o executor isolado.',
       inputSchema: z.object({
-        workspace_id: z.string().uuid(), repository_url: z.string().url().max(500),
-        destination: z.string().min(1).max(180), ref: z.string().min(1).max(180).optional()
+        workspace_id: z.string().uuid().describe('ID do workspace'),
+        repository_url: z.string().url().max(500).describe('URL HTTPS pública do repositório no GitHub'),
+        destination: z.string().min(1).max(180).describe('Nome da pasta de destino no workspace'),
+        ref: z.string().min(1).max(180).optional().describe('Branch ou tag opcional')
       }),
       annotations: { ...localWrite, openWorldHint: true }
     }, ({ workspace_id, repository_url, destination, ref }) =>
@@ -135,10 +142,12 @@ export function createWorkspaceMcpEndpoint(
 
     server.registerTool('goal_run', {
       title: 'Executar objetivo automaticamente',
-      description: 'Delega um objetivo completo ao agente Gemini dentro do workspace. Ele pode inspecionar, criar, editar e testar arquivos até concluir.',
+      description: 'Delega um objetivo autônomo ao agente Gemini dentro do workspace. Ferramenta avançada para tarefas personalizadas. Prefira artifact_create para criação de documentos (PDF, DOCX, XLSX, PPTX, APKG) e task_run para tarefas orquestradas.',
       inputSchema: z.object({
-        workspace_id: z.string().uuid(), goal: z.string().min(1).max(40_000),
-        model: z.string().max(100).optional(), effort: z.enum(['low', 'medium', 'high']).default('high')
+        workspace_id: z.string().uuid().describe('ID do workspace'),
+        goal: z.string().min(1).max(40_000).describe('Objetivo completo a ser executado pelo agente'),
+        model: z.string().max(100).optional().describe('Modelo de IA a utilizar'),
+        effort: z.enum(['low', 'medium', 'high']).default('high').describe('Nível de esforço de raciocínio')
       }),
       annotations: openWorld
     }, ({ workspace_id, goal, model, effort }) => guarded(() => workspaces.goalRun(workspace_id, goal, model, effort)));
@@ -211,10 +220,64 @@ export function createWorkspaceMcpEndpoint(
 
     server.registerTool('artifact_publish', {
       title: 'Publicar artefato',
-      description: 'Publica uma cópia de um arquivo do workspace e devolve uma URL HTTPS de download difícil de adivinhar.',
-      inputSchema: z.object({ workspace_id: z.string().uuid(), path: z.string().min(1).max(500) }),
+      description: 'Publica uma cópia de um arquivo do workspace e devolve uma URL HTTPS de download assinada e temporária.',
+      inputSchema: z.object({
+        workspace_id: z.string().uuid().describe('ID do workspace'),
+        path: z.string().min(1).max(500).describe('Caminho relativo do arquivo no workspace')
+      }),
       annotations: { ...localWrite, openWorldHint: true }
     }, ({ workspace_id, path }) => guarded(() => workspaces.publishArtifact(workspace_id, path)));
+
+    server.registerTool('artifact_create', {
+      title: 'Criar documento ou artefato (PDF, Word, Excel, PowerPoint, Anki)',
+      description: 'Cria automaticamente documentos e arquivos completos a partir de pedidos em linguagem natural. Detecta o formato, seleciona a skill adequada (document-pdf, document-docx, document-xlsx, document-pptx, anki-apkg), gera, valida a integridade do arquivo e publica o artefato com link seguro de download. Exemplos: "Faça um PDF sobre...", "Create a PDF about...", "Crie um documento Word/DOCX", "Crie uma planilha de gastos", "Faça uma apresentação em slides/PPTX", "Crie flashcards para o Anki". Prefira esta ferramenta sobre goal_run ou shell_execute para criação de documentos.',
+      inputSchema: z.object({
+        request: z.string().min(1).max(40_000).describe('Descrição do documento a ser criado, incluindo tema, seções e conteúdo desejado'),
+        format: z.enum(['auto', 'pdf', 'docx', 'xlsx', 'pptx', 'apkg']).default('auto').describe('Formato do arquivo ("auto" detecta automaticamente pelo pedido)'),
+        filename: z.string().max(180).optional().describe('Nome desejado para o arquivo (ex: "apostila.pdf")'),
+        workspace_id: z.string().uuid().optional().describe('ID do workspace existente. Se omitido, um novo workspace é criado automaticamente'),
+        model: z.string().max(100).optional().describe('Modelo de IA a utilizar'),
+        effort: z.enum(['low', 'medium', 'high']).default('high').describe('Nível de esforço de raciocínio')
+      }),
+      annotations: { ...localWrite, openWorldHint: true }
+    }, (params) => guarded(() => workspaces.artifactCreate(params)));
+
+    server.registerTool('task_run', {
+      title: 'Executar tarefa orquestrada no workspace',
+      description: 'Orquestrador de alto nível para tarefas completas de desenvolvimento, automação e correção. Prepara o workspace, opcionalmente clona repositórios GitHub, executa os objetivos e compila arquivos alterados e artefatos. Use para pedidos como "Clone este repositório, encontre o erro e corrija", "Refatore o projeto e rode os testes".',
+      inputSchema: z.object({
+        request: z.string().min(1).max(40_000).describe('Descrição completa da tarefa a ser executada'),
+        workspace_id: z.string().uuid().optional().describe('ID do workspace existente. Se omitido, um novo workspace é criado'),
+        repository_url: z.string().url().max(500).optional().describe('URL HTTPS pública de repositório GitHub para clonar antes da execução'),
+        ref: z.string().min(1).max(180).optional().describe('Branch, tag ou commit opcional do repositório'),
+        model: z.string().max(100).optional().describe('Modelo de IA a utilizar'),
+        effort: z.enum(['low', 'medium', 'high']).default('high').describe('Nível de esforço de raciocínio')
+      }),
+      annotations: openWorld
+    }, (params) => guarded(() => workspaces.taskRun(params)));
+
+    server.registerTool('artifact_revise', {
+      title: 'Revisar artefato existente',
+      description: 'Aplica revisões e modificações a um documento ou artefato já gerado em um workspace. Exemplo: "Mude o PDF e acrescente 20 exercícios", "Atualize a planilha com novos dados". Publica uma nova versão do artefato.',
+      inputSchema: z.object({
+        workspace_id: z.string().uuid().describe('ID do workspace que contém o artefato'),
+        instructions: z.string().min(1).max(40_000).describe('Instruções de revisão a serem aplicadas no documento'),
+        artifact_name: z.string().min(1).max(180).optional().describe('Nome do arquivo específico a ser revisado caso haja múltiplos'),
+        model: z.string().max(100).optional().describe('Modelo de IA a utilizar'),
+        effort: z.enum(['low', 'medium', 'high']).default('high').describe('Nível de esforço')
+      }),
+      annotations: { ...localWrite, openWorldHint: true }
+    }, (params) => guarded(() => workspaces.artifactRevise(params)));
+
+    server.registerTool('artifact_get', {
+      title: 'Consultar artefato e renovar download',
+      description: 'Obtém metadados de um artefato previamente publicado e gera uma URL assinada atualizada com validade renovada sem precisar regenerar o arquivo.',
+      inputSchema: z.object({
+        workspace_id: z.string().uuid().describe('ID do workspace'),
+        artifact_id: z.string().uuid().describe('ID do artefato publicado')
+      }),
+      annotations: readOnly
+    }, ({ workspace_id, artifact_id }) => guarded(() => workspaces.artifactGet(workspace_id, artifact_id)));
 
     server.registerTool('commands', {
       title: 'Comandos rápidos e catálogo de ferramentas',
@@ -234,6 +297,7 @@ export function createWorkspaceMcpEndpoint(
         { command: '/update', description: 'Executa a atualização protegida do Antigravity CLI' }
       ];
       const workspaceTools = [
+        'artifact_create', 'task_run', 'artifact_revise', 'artifact_get',
         'workspace_create', 'workspace_delete', 'workspace_info', 'file_list', 'file_read',
         'file_write', 'file_edit', 'shell_execute', 'git_clone', 'goal_run', 'skill_list',
         'skill_catalog', 'skill_read', 'skill_resources', 'skill_install',

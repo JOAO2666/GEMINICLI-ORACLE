@@ -9,6 +9,7 @@ import {
   createOpenAIToolContext,
   parsePreviousAssistantToolCalls
 } from './openai-tools.js';
+import { ContextWindowManager } from './services/context-window.js';
 
 const roleSchema = z.enum(['system', 'developer', 'user', 'assistant', 'tool']);
 const messageSchema = z.object({
@@ -161,8 +162,8 @@ export async function prepareOpenAIRequest(body: unknown, config: Config) {
       }
     }
     if (turns.length === 0) throw new AppError(400, 'EMPTY_MESSAGES', 'Nenhuma mensagem válida foi enviada.');
-    let transcript = turns.join('\n\n');
-    if (transcript.length > config.MAX_HISTORY_CHARS) transcript = transcript.slice(-config.MAX_HISTORY_CHARS);
+    const windowManager = new ContextWindowManager(config.MAX_HISTORY_CHARS);
+    const transcript = windowManager.trimTranscript('', turns, config.MAX_HISTORY_CHARS).trim();
     const promptParts = [
       'Responda à conversa abaixo como o assistente solicitado.',
       'Não modifique arquivos nem execute comandos. Imagens anexadas são somente dados para análise.',

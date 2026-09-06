@@ -31,6 +31,34 @@ export interface AttachmentRow {
   created_at: string;
 }
 
+export interface ArtifactRecord {
+  id: string;
+  workspace_id: string;
+  name: string;
+  stored_path: string;
+  mime_type: string;
+  size: number;
+  sha256: string;
+  created_at: string;
+  expires_at: string;
+}
+
+export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+
+export interface JobRecord {
+  id: string;
+  type: string;
+  workspace_id: string | null;
+  status: JobStatus;
+  progress?: number;
+  result?: string;
+  error?: string;
+  created_at: string;
+  started_at?: string;
+  updated_at: string;
+  finished_at?: string;
+}
+
 export class AppDatabase {
   private readonly db: Database.Database;
 
@@ -43,42 +71,97 @@ export class AppDatabase {
   }
 
   private migrate() {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS conversations (
-        id TEXT PRIMARY KEY,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        model TEXT NOT NULL,
-        gemini_session_id TEXT
-      );
-      CREATE TABLE IF NOT EXISTS messages (
-        id TEXT PRIMARY KEY,
-        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-        role TEXT NOT NULL CHECK(role IN ('user','assistant')),
-        content TEXT NOT NULL,
-        created_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
-      CREATE TABLE IF NOT EXISTS attachments (
-        id TEXT PRIMARY KEY,
-        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-        message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
-        original_name TEXT NOT NULL,
-        stored_path TEXT NOT NULL UNIQUE,
-        mime_type TEXT NOT NULL,
-        size INTEGER NOT NULL,
-        created_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_attachments_conversation ON attachments(conversation_id, created_at);
-      CREATE TABLE IF NOT EXISTS sessions (
-        id TEXT PRIMARY KEY,
-        conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-        provider TEXT NOT NULL,
-        provider_session_id TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-    `);
+    const currentVersion = Number(this.db.pragma('user_version', { simple: true }) || 0);
+
+    if (currentVersion < 1) {
+      this.db.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS conversations (
+            id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            model TEXT NOT NULL,
+            gemini_session_id TEXT
+          );
+          CREATE TABLE IF NOT EXISTS messages (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            role TEXT NOT NULL CHECK(role IN ('user','assistant')),
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
+          CREATE TABLE IF NOT EXISTS attachments (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            message_id TEXT REFERENCES messages(id) ON DELETE SET NULL,
+            original_name TEXT NOT NULL,
+            stored_path TEXT NOT NULL UNIQUE,
+            mime_type TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_attachments_conversation ON attachments(conversation_id, created_at);
+          CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            provider TEXT NOT NULL,
+            provider_session_id TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+        `);
+        this.db.pragma('user_version = 1');
+      })();
+    }
+
+    if (currentVersion < 2) {
+      this.db.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS artifacts (
+            id TEXT PRIMARY KEY,
+            workspace_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            stored_path TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            size INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL
+          );
+          CREATE INDEX IF NOT EXISTS idx_artifacts_workspace ON artifacts(workspace_id, created_at);
+        `);
+        this.db.pragma('user_version = 2');
+      })();
+    }
+
+    if (currentVersion < 3) {
+      this.db.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            workspace_id TEXT,
+            status TEXT NOT NULL CHECK(status IN ('queued','running','completed','failed','cancelled','interrupted')),
+            progress REAL DEFAULT 0,
+            result TEXT,
+            error TEXT,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            updated_at TEXT NOT NULL,
+            finished_at TEXT
+          );
+          CREATE INDEX IF NOT EXISTS idx_jobs_workspace ON jobs(workspace_id, status);
+          CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at);
+        `);
+        this.db.pragma('user_version = 3');
+      })();
+    }
+
+    // Mark previously running jobs as interrupted upon server startup
+    const now = new Date().toISOString();
+    this.db.prepare("UPDATE jobs SET status = 'interrupted', updated_at = ?, finished_at = ? WHERE status = 'running'")
+      .run(now, now);
   }
 
   createConversation(model: string): ConversationRow {
@@ -165,6 +248,94 @@ export class AppDatabase {
 
   deleteAttachment(id: string): void {
     this.db.prepare('DELETE FROM attachments WHERE id=?').run(id);
+  }
+
+  // Artifact methods
+  saveArtifact(record: ArtifactRecord): void {
+    this.db.prepare(`
+      INSERT OR REPLACE INTO artifacts
+        (id, workspace_id, name, stored_path, mime_type, size, sha256, created_at, expires_at)
+      VALUES
+        (@id, @workspace_id, @name, @stored_path, @mime_type, @size, @sha256, @created_at, @expires_at)
+    `).run(record);
+  }
+
+  getArtifact(workspaceId: string, artifactId: string): ArtifactRecord | undefined {
+    return this.db.prepare(
+      'SELECT * FROM artifacts WHERE workspace_id = ? AND id = ?'
+    ).get(workspaceId, artifactId) as ArtifactRecord | undefined;
+  }
+
+  listWorkspaceArtifacts(workspaceId: string): ArtifactRecord[] {
+    return this.db.prepare(
+      'SELECT * FROM artifacts WHERE workspace_id = ? ORDER BY created_at DESC'
+    ).all(workspaceId) as ArtifactRecord[];
+  }
+
+  // Jobs methods
+  createJob(type: string, workspaceId?: string | null): JobRecord {
+    const now = new Date().toISOString();
+    const row: JobRecord = {
+      id: randomUUID(),
+      type,
+      workspace_id: workspaceId ?? null,
+      status: 'queued',
+      progress: 0,
+      created_at: now,
+      updated_at: now
+    };
+    this.db.prepare(`
+      INSERT INTO jobs (id, type, workspace_id, status, progress, created_at, updated_at)
+      VALUES (@id, @type, @workspace_id, @status, @progress, @created_at, @updated_at)
+    `).run(row);
+    return row;
+  }
+
+  updateJob(id: string, update: Partial<JobRecord>): void {
+    const fields: string[] = ['updated_at = ?'];
+    const values: unknown[] = [new Date().toISOString()];
+
+    if (update.status !== undefined) {
+      fields.push('status = ?');
+      values.push(update.status);
+      if (update.status === 'running' && !update.started_at) {
+        fields.push('started_at = ?');
+        values.push(new Date().toISOString());
+      } else if (['completed', 'failed', 'cancelled', 'interrupted'].includes(update.status) && !update.finished_at) {
+        fields.push('finished_at = ?');
+        values.push(new Date().toISOString());
+      }
+    }
+    if (update.progress !== undefined) {
+      fields.push('progress = ?');
+      values.push(update.progress);
+    }
+    if (update.result !== undefined) {
+      fields.push('result = ?');
+      values.push(update.result);
+    }
+    if (update.error !== undefined) {
+      fields.push('error = ?');
+      values.push(update.error);
+    }
+    values.push(id);
+
+    this.db.prepare(`UPDATE jobs SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  }
+
+  getJob(id: string): JobRecord | undefined {
+    return this.db.prepare('SELECT * FROM jobs WHERE id = ?').get(id) as JobRecord | undefined;
+  }
+
+  listJobs(workspaceId?: string, limit = 50): JobRecord[] {
+    if (workspaceId) {
+      return this.db.prepare(
+        'SELECT * FROM jobs WHERE workspace_id = ? ORDER BY created_at DESC LIMIT ?'
+      ).all(workspaceId, limit) as JobRecord[];
+    }
+    return this.db.prepare(
+      'SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?'
+    ).all(limit) as JobRecord[];
   }
 
   close(): void { this.db.close(); }

@@ -74,11 +74,12 @@ describe('Remote MCP endpoint', () => {
       await client.connect(transport);
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
-        'artifact_list', 'artifact_publish', 'cli_execute', 'cli_help', 'cli_history', 'cli_update',
+        'artifact_create', 'artifact_get', 'artifact_list', 'artifact_publish', 'artifact_revise',
+        'cli_execute', 'cli_help', 'cli_history', 'cli_update',
         'commands', 'file_edit', 'file_list', 'file_read', 'file_write', 'git_clone',
         'goal_run', 'model_current', 'model_set', 'models', 'shell_execute',
         'skill_catalog', 'skill_install', 'skill_install_catalog', 'skill_list',
-        'skill_read', 'skill_remove', 'skill_resources', 'status', 'usage',
+        'skill_read', 'skill_remove', 'skill_resources', 'status', 'task_run', 'usage',
         'usage_last', 'workspace_create', 'workspace_delete', 'workspace_info'
       ]);
       const created = await client.callTool({ name: 'workspace_create', arguments: { name: 'Integração' } });

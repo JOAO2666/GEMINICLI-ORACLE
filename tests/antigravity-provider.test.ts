@@ -110,4 +110,33 @@ describe('dynamic Antigravity discovery', () => {
     expect(ambiguous.ambiguous).toBeDefined();
     expect(ambiguous.ambiguous?.length).toBe(3);
   });
+
+  it('correctly compares version tuples so 3.10 is newer than 3.9', () => {
+    const availableWithFuture = [
+      'gemini-3.8-flash',
+      'gemini-3.9-flash',
+      'gemini-3.10-flash',
+      'gemini-4.0-flash'
+    ];
+    expect(resolveModelAlias('latest-flash', availableWithFuture)).toEqual({ model: 'gemini-4.0-flash' });
+
+    const availableBetween39and310 = [
+      'gemini-3.9-flash',
+      'gemini-3.10-flash'
+    ];
+    expect(resolveModelAlias('latest-flash', availableBetween39and310)).toEqual({ model: 'gemini-3.10-flash' });
+    expect(resolveModelAlias('flash', availableBetween39and310)).toEqual({ model: 'gemini-3.10-flash' });
+  });
+
+  it('resolves latest aliases dynamically', () => {
+    const available = [
+      'gemini-3.8-flash-high',
+      'gemini-3.1-pro-high',
+      'claude-sonnet-4-6',
+      'claude-opus-4-6'
+    ];
+    expect(resolveModelAlias('latest-pro', available)).toEqual({ model: 'gemini-3.1-pro-high' });
+    expect(resolveModelAlias('latest-sonnet', available)).toEqual({ model: 'claude-sonnet-4-6' });
+    expect(resolveModelAlias('latest-opus', available)).toEqual({ model: 'claude-opus-4-6' });
+  });
 });
