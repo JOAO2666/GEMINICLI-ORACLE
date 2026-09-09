@@ -299,10 +299,28 @@ export async function buildApp(
     if (!prepared.input.stream) {
       const controller = new AbortController();
       let finished = false;
+      let rawResponseStarted = false;
       const abort = () => { if (!finished) controller.abort(); };
       request.raw.once('aborted', abort);
       reply.raw.once('close', abort);
+      const heartbeat = setInterval(() => {
+        if (finished || reply.raw.destroyed) return;
+        if (!rawResponseStarted) {
+          rawResponseStarted = true;
+          reply.hijack();
+          reply.raw.writeHead(200, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Cache-Control': 'no-cache, no-transform',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+          });
+        }
+        // JSON permits leading whitespace. Sending a tiny chunk keeps clients
+        // such as NumIA from treating a long model generation as a dead socket.
+        reply.raw.write(' ');
+      }, 5_000);
       try {
+        let completion: unknown;
         if (prepared.toolContext) {
           let decision: OpenAIToolDecision | undefined;
           for await (const event of provider.streamMessage({
@@ -319,19 +337,31 @@ export async function buildApp(
             }
           }
           if (!decision) throw new AppError(502, 'MISSING_TOOL_DECISION', 'O modelo não concluiu a decisão de ferramenta.');
-          return openAIToolCompletion(id, created, model, decision);
+          completion = openAIToolCompletion(id, created, model, decision);
+        } else {
+          const text = await provider.sendMessage({
+            conversationId: prepared.conversationId,
+            prompt: prepared.prompt,
+            model,
+            workingDirectory: prepared.workingDirectory,
+            autoApprove: prepared.imageCount > 0,
+            signal: controller.signal
+          });
+          completion = openAICompletion(id, created, model, text);
         }
-        const text = await provider.sendMessage({
-          conversationId: prepared.conversationId,
-          prompt: prepared.prompt,
-          model,
-          workingDirectory: prepared.workingDirectory,
-          autoApprove: prepared.imageCount > 0,
-          signal: controller.signal
-        });
-        return openAICompletion(id, created, model, text);
+        if (!rawResponseStarted) return completion;
+        if (!reply.raw.destroyed) reply.raw.end(JSON.stringify(completion));
+        return;
+      } catch (error) {
+        if (!rawResponseStarted) throw error;
+        const safe = publicError(error);
+        if (!reply.raw.destroyed) {
+          reply.raw.end(JSON.stringify({ error: { message: safe.message, type: 'server_error', code: safe.code } }));
+        }
+        return;
       } finally {
         finished = true;
+        clearInterval(heartbeat);
         request.raw.removeListener('aborted', abort);
         reply.raw.removeListener('close', abort);
         await prepared.cleanup();

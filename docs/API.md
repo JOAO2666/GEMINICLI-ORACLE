@@ -19,10 +19,9 @@ O servidor também aceita o formato OpenAI usado pelo aplicativo
 
 As variantes `/v1/models` e `/v1/chat/completions` também são aceitas. Texto e imagens
 locais em Data URL são suportados. URLs remotas de imagem são recusadas por segurança.
-Requisições com imagens usam `VISION_MODEL` quando ele estiver preenchido; isso permite
-que uma conversa selecionada no Pro use o Flash rápido para analisar fotos e não bloqueie
-a fila única da VM pequena. O exemplo recomenda `gemini-3.6-flash-high`. Deixe `VISION_MODEL`
-vazio somente se quiser que imagens sigam o modelo enviado no campo `model`.
+Por padrão, `VISION_MODEL` fica vazio: cada requisição com imagem usa exatamente o modelo
+enviado no campo `model`, sem roteamento para um modelo diferente. Preencha `VISION_MODEL`
+somente se quiser forçar explicitamente um modelo único para todas as imagens.
 
 ## OpenAI Tool Calling
 
