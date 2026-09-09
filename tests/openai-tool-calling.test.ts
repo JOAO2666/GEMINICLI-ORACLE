@@ -87,6 +87,7 @@ describe('OpenAI Tool Calling', { timeout: 20_000 }, () => {
       });
       expect(provider.sent).toHaveLength(1);
       expect(provider.sent[0]?.jsonSchema).toBeUndefined();
+      expect(provider.sent[0]?.signal).toBeInstanceOf(AbortSignal);
       expect(provider.streamed).toHaveLength(0);
     } finally {
       await app.close();

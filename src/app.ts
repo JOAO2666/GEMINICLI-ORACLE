@@ -292,10 +292,16 @@ export async function buildApp(
     const model = prepared.imageCount > 0 && config.VISION_MODEL
       ? await validateAvailableModel(config.visionModel)
       : await validateAvailableModel(requestedModel);
+    request.log.info({ requestedModel, model, imageCount: prepared.imageCount }, 'OpenAI request routed');
     const id = `chatcmpl-${prepared.conversationId}`;
     const created = Math.floor(Date.now() / 1000);
 
     if (!prepared.input.stream) {
+      const controller = new AbortController();
+      let finished = false;
+      const abort = () => { if (!finished) controller.abort(); };
+      request.raw.once('aborted', abort);
+      reply.raw.once('close', abort);
       try {
         if (prepared.toolContext) {
           let decision: OpenAIToolDecision | undefined;
@@ -305,7 +311,8 @@ export async function buildApp(
             model,
             workingDirectory: prepared.workingDirectory,
             autoApprove: prepared.imageCount > 0,
-            jsonSchema: prepared.toolContext.outputSchema
+            jsonSchema: prepared.toolContext.outputSchema,
+            signal: controller.signal
           })) {
             if (event.type === 'complete') {
               decision = parseOpenAIToolDecision(event.structuredOutput, event.text, prepared.toolContext);
@@ -319,10 +326,14 @@ export async function buildApp(
           prompt: prepared.prompt,
           model,
           workingDirectory: prepared.workingDirectory,
-          autoApprove: prepared.imageCount > 0
+          autoApprove: prepared.imageCount > 0,
+          signal: controller.signal
         });
         return openAICompletion(id, created, model, text);
       } finally {
+        finished = true;
+        request.raw.removeListener('aborted', abort);
+        reply.raw.removeListener('close', abort);
         await prepared.cleanup();
       }
     }

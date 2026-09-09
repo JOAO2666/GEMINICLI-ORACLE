@@ -60,7 +60,7 @@ Edite `.env`:
 - cole a saída aleatória em `NUMIA_SERVER_TOKEN`;
 - defina `DOMAIN` para o domínio público;
 - mantenha `DEFAULT_MODEL=gemini-3.8-flash-high` para usar o Gemini 3.8 Flash;
-- mantenha `VISION_MODEL=gemini-3.8-flash-high` para analisar imagens com o Flash rápido, mesmo quando uma conversa de texto estiver no Pro;
+- mantenha `VISION_MODEL=gemini-3.7-flash-high` para analisar imagens com o Flash rápido e estável, mesmo quando uma conversa de texto estiver no Pro;
 - deixe `ALLOWED_MODELS` vazio para liberar automaticamente tudo que `agy models` oferecer (Gemini, Claude e GPT-OSS), ou preencha para restringir;
 - use `MAX_GEMINI_PROCESSES=1` em VM de 1 GB.
 

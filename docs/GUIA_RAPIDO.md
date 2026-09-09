@@ -92,7 +92,7 @@ Na tela de chave de API do NumIA:
 3. Avance e escolha um dos modelos retornados pelo servidor.
 
 O envio de imagens usa `VISION_MODEL` quando configurado. O exemplo já recomenda
-`VISION_MODEL=gemini-3.8-flash-high`, para que fotos sejam analisadas pelo Flash rápido
+`VISION_MODEL=gemini-3.7-flash-high`, para que fotos sejam analisadas pelo Flash rápido
 mesmo quando a conversa estiver selecionada no Pro. Isso evita que uma análise de imagem
 mais demorada bloqueie as demais mensagens na VM pequena. Deixe vazio somente se quiser
 que imagens sigam o modelo escolhido na requisição.

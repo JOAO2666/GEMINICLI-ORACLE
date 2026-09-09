@@ -21,7 +21,7 @@ As variantes `/v1/models` e `/v1/chat/completions` também são aceitas. Texto e
 locais em Data URL são suportados. URLs remotas de imagem são recusadas por segurança.
 Requisições com imagens usam `VISION_MODEL` quando ele estiver preenchido; isso permite
 que uma conversa selecionada no Pro use o Flash rápido para analisar fotos e não bloqueie
-a fila única da VM pequena. O exemplo recomenda `gemini-3.8-flash-high`. Deixe `VISION_MODEL`
+a fila única da VM pequena. O exemplo recomenda `gemini-3.7-flash-high`. Deixe `VISION_MODEL`
 vazio somente se quiser que imagens sigam o modelo enviado no campo `model`.
 
 ## OpenAI Tool Calling
