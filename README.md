@@ -1,6 +1,6 @@
-# Gemini API ILIMITADO
+# NumIA Gemini Server
 
-Backend privado de alto desempenho que conecta qualquer aplicação ao **Antigravity CLI oficial do Google**, autenticado com a conta Google AI Pro do proprietário. Não usa Gemini API Key tradicional, não replica chamadas internas do Google e nunca envia as credenciais OAuth aos clientes. Oferece acesso ilimitado aos modelos Gemini (3.8 Flash, 3.1 Pro), Claude (Sonnet 4.6, Opus 4.6 Thinking) e GPT-OSS via API REST/SSE, Servidor MCP e Controle Remoto Web oficial.
+Backend privado de alto desempenho que conecta qualquer aplicação ao **Antigravity CLI oficial do Google**, autenticado com a conta Google AI Pro do proprietário. Não usa Gemini API Key tradicional, não replica chamadas internas do Google e nunca envia as credenciais OAuth aos clientes. Oferece acesso aos modelos disponibilizados para a conta via API REST/SSE, Servidor MCP e Controle Remoto Web oficial. O acesso continua sujeito às cotas, limites e regras da conta Google; este projeto não promete uso ilimitado.
 
 > Desde 18 de junho de 2026, o Google desativou o login pessoal do antigo Gemini CLI para os planos Individuals, Google AI Pro e Google AI Ultra. O sucessor oficial é o Antigravity CLI (`agy`). O backend usa esse caminho suportado e continua acessando os modelos Gemini da assinatura, incluindo Gemini 3.1 Pro.
 
@@ -60,6 +60,7 @@ Edite `.env`:
 - cole a saída aleatória em `NUMIA_SERVER_TOKEN`;
 - defina `DOMAIN` para o domínio público;
 - mantenha `DEFAULT_MODEL=gemini-3.8-flash-high` para usar o Gemini 3.8 Flash;
+- mantenha `VISION_MODEL=gemini-3.8-flash-high` para analisar imagens com o Flash rápido, mesmo quando uma conversa de texto estiver no Pro;
 - deixe `ALLOWED_MODELS` vazio para liberar automaticamente tudo que `agy models` oferecer (Gemini, Claude e GPT-OSS), ou preencha para restringir;
 - use `MAX_GEMINI_PROCESSES=1` em VM de 1 GB.
 

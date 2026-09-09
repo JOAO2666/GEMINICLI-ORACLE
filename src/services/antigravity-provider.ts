@@ -8,6 +8,8 @@ import { parseJsonLine } from './stream-parser.js';
 
 type ChannelItem = { event: ProviderEvent } | { error: Error } | { done: true };
 
+export type ReasoningEffort = 'low' | 'medium' | 'high';
+
 class AsyncChannel {
   private items: ChannelItem[] = [];
   private waiters: Array<(item: ChannelItem) => void> = [];
@@ -232,7 +234,16 @@ export function buildAntigravityArgs(request: ProviderRequest, timeoutMs: number
     '--sandbox',
     '--print-timeout', `${timeoutSeconds}s`
   ];
-  if (request.effort) args.push('--effort', request.effort);
+  // The Antigravity CLI treats the -high/-medium/-low model suffix as an
+  // explicit effort tier. Passing a different --effort makes the CLI reject
+  // the request before it reaches the model. MCP tools commonly default to
+  // high, so normalize the flag to the selected model when a tier is present.
+  if (request.effort) {
+    const modelTier = /^gemini-/i.test(request.model)
+      ? /-(low|medium|high)$/i.exec(request.model)?.[1]?.toLowerCase() as ReasoningEffort | undefined
+      : undefined;
+    args.push('--effort', modelTier ?? request.effort);
+  }
   if (request.autoApprove) args.push('--dangerously-skip-permissions');
   if (request.jsonSchema) args.push('--json-schema', JSON.stringify(request.jsonSchema));
   return args;
@@ -426,7 +437,13 @@ export class AntigravityCLIProvider implements AIProvider {
       controller.signal.addEventListener('abort', terminate, { once: true });
       const timeout = setTimeout(() => {
         controller.abort();
-        if (!settled) channel.push({ error: new AppError(504, 'AI_TIMEOUT', 'O Antigravity CLI excedeu o tempo limite.') });
+        if (!settled) channel.push({
+          error: new AppError(
+            504,
+            'AI_TIMEOUT',
+            `O modelo ${request.model} demorou mais que o limite permitido para responder. Tente o Gemini Flash para respostas mais rápidas.`
+          )
+        });
       }, this.config.AGY_TIMEOUT_MS + 5_000);
 
       const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });

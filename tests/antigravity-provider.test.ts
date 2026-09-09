@@ -39,6 +39,19 @@ describe('Antigravity CLI arguments', () => {
       '--json-schema', JSON.stringify(schema)
     ]);
   });
+
+  it('normalizes MCP effort to the tier encoded in a Gemini model slug', () => {
+    expect(buildAntigravityArgs({
+      ...baseRequest,
+      model: 'gemini-3.8-flash-low',
+      effort: 'high'
+    }, 300_000)).toContainEqual('--effort');
+    expect(buildAntigravityArgs({
+      ...baseRequest,
+      model: 'gemini-3.8-flash-low',
+      effort: 'high'
+    })).toEqual(expect.arrayContaining(['--effort', 'low']));
+  });
 });
 
 describe('dynamic Antigravity discovery', () => {
