@@ -140,6 +140,14 @@ gráficos sem rótulos ou outros detalhes puramente visuais. Se o OCR não encon
 retorna `IMAGE_OCR_EMPTY` claramente. O limite por imagem pode ser ajustado com
 `IMAGE_OCR_TIMEOUT_MS` (padrão: 30000 ms).
 
+Cada nova mensagem aceita até 20 imagens por padrão (`MAX_FILES_PER_UPLOAD`). Como clientes
+como o NumIA reenviam todo o histórico a cada pergunta, o servidor dá prioridade às imagens
+da mensagem atual e mantém somente as imagens anteriores mais recentes que couberem no
+limite. Assim, fotos antigas não provocam `413 TOO_MANY_FILES` em uma mensagem posterior.
+Imagens idênticas são armazenadas uma única vez durante a requisição. O total decodificado é
+limitado por `MAX_TOTAL_IMAGE_BYTES` (64 MiB por padrão) para evitar falta de memória na VM
+Oracle Always Free; cada arquivo continua limitado por `MAX_UPLOAD_BYTES` (25 MiB).
+
 Respostas OpenAI-compatible em SSE recebem um comentário `keep-alive` a cada
 `STREAM_HEARTBEAT_MS` (padrão: 5000 ms). Isso evita o timeout de leitura de 40 segundos do
 NumIA quando modelos mais lentos, como Gemini Pro, ficam muito tempo analisando várias

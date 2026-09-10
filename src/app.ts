@@ -54,7 +54,15 @@ export async function buildApp(
   options: { provider?: AIProvider; commandRegistry?: AntigravityCommandRegistry; storageGuardian?: StorageGuardian } = {}
 ): Promise<FastifyInstance> {
   await fs.mkdir(config.dataDir, { recursive: true, mode: 0o700 });
-  const app = Fastify({ logger: { redact: ['req.headers.authorization', 'request.headers.authorization'] }, trustProxy: config.TRUST_PROXY });
+  // OpenAI-compatible clients embed images as Base64 inside JSON. Account for
+  // the ~4/3 Base64 expansion plus JSON/text overhead while keeping a strict
+  // decoded-image ceiling in prepareOpenAIRequest.
+  const bodyLimit = Math.ceil(config.MAX_TOTAL_IMAGE_BYTES * 4 / 3) + 2 * 1024 * 1024;
+  const app = Fastify({
+    logger: { redact: ['req.headers.authorization', 'request.headers.authorization'] },
+    trustProxy: config.TRUST_PROXY,
+    bodyLimit
+  });
   const db = new AppDatabase(config.dataDir);
   const files = new FileService(config, db);
   const chats = new ChatService(config, db);

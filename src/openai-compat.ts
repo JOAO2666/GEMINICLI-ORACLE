@@ -42,8 +42,9 @@ async function saveDataImage(
   url: string,
   workingDirectory: string,
   index: number,
-  config: Config
-): Promise<string> {
+  config: Config,
+  remainingTotalBytes: number
+): Promise<{ name: string; size: number }> {
   const match = /^data:(image\/(?:jpeg|png|webp));base64,([\s\S]+)$/i.exec(url);
   if (!match?.[1] || !match[2]) {
     throw new AppError(415, 'UNSUPPORTED_IMAGE', 'O NumIA enviou uma imagem em formato não suportado.');
@@ -60,6 +61,9 @@ async function saveDataImage(
   if (buffer.length === 0 || buffer.length > config.MAX_UPLOAD_BYTES) {
     throw new AppError(buffer.length ? 413 : 400, buffer.length ? 'FILE_TOO_LARGE' : 'EMPTY_FILE', 'Imagem inválida ou maior que o limite permitido.');
   }
+  if (buffer.length > remainingTotalBytes) {
+    throw new AppError(413, 'IMAGES_TOO_LARGE', 'O tamanho total das imagens ultrapassa o limite permitido por envio.');
+  }
   const detected = await fileTypeFromBuffer(buffer);
   const extension = detected ? imageExtensions.get(detected.mime) : undefined;
   if (!extension || detected?.mime !== mime) {
@@ -67,14 +71,60 @@ async function saveDataImage(
   }
   const name = `numia-image-${index}${extension}`;
   await fs.writeFile(path.join(workingDirectory, name), buffer, { mode: 0o600, flag: 'wx' });
-  return name;
+  return { name, size: buffer.length };
+}
+
+type ImageState = {
+  value: number;
+  paths: string[];
+  totalBytes: number;
+  cachedPaths: Map<string, string>;
+};
+
+function imageParts(content: unknown): object[] {
+  if (!Array.isArray(content)) return [];
+  return content.filter((rawPart): rawPart is object => Boolean(
+    rawPart && typeof rawPart === 'object' && (rawPart as Record<string, unknown>).type === 'image_url'
+  ));
+}
+
+function selectImageParts(input: OpenAIChatInput, maxImages: number): WeakSet<object> {
+  let latestUserIndex = -1;
+  for (let index = input.messages.length - 1; index >= 0; index -= 1) {
+    if (input.messages[index]?.role === 'user') {
+      latestUserIndex = index;
+      break;
+    }
+  }
+
+  const current = latestUserIndex >= 0 ? imageParts(input.messages[latestUserIndex]?.content) : [];
+  if (current.length > maxImages) {
+    throw new AppError(413, 'TOO_MANY_FILES', `Envie no máximo ${maxImages} imagens por mensagem.`);
+  }
+
+  const selected = new WeakSet<object>();
+  current.forEach((part) => selected.add(part));
+  let remaining = maxImages - current.length;
+
+  // NumIA resends the entire conversation. Preserve the most recent images
+  // that fit, but never let old attachments reject a new message.
+  for (let messageIndex = input.messages.length - 1; messageIndex >= 0 && remaining > 0; messageIndex -= 1) {
+    if (messageIndex === latestUserIndex) continue;
+    const historical = imageParts(input.messages[messageIndex]?.content);
+    for (let partIndex = historical.length - 1; partIndex >= 0 && remaining > 0; partIndex -= 1) {
+      selected.add(historical[partIndex]!);
+      remaining -= 1;
+    }
+  }
+  return selected;
 }
 
 async function contentToText(
   content: unknown,
   workingDirectory: string,
-  imageCounter: { value: number; paths: string[] },
-  config: Config
+  imageCounter: ImageState,
+  config: Config,
+  selectedImages: WeakSet<object>
 ): Promise<string> {
   if (typeof content === 'string') return neutralizeCliShortcuts(content);
   if (content === null || content === undefined) return '';
@@ -89,18 +139,34 @@ async function contentToText(
       continue;
     }
     if (part.type === 'image_url') {
-      if (imageCounter.value >= config.MAX_FILES_PER_UPLOAD) {
-        throw new AppError(413, 'TOO_MANY_FILES', 'Quantidade de imagens maior que o limite permitido.');
+      if (!selectedImages.has(rawPart as object)) {
+        pieces.push('[Imagem anterior omitida para manter a conversa dentro do limite.]');
+        continue;
       }
       const image = part.image_url;
       const url = image && typeof image === 'object' ? (image as Record<string, unknown>).url : undefined;
       if (typeof url !== 'string' || !url.startsWith('data:')) {
         throw new AppError(400, 'REMOTE_IMAGE_NOT_ALLOWED', 'Use imagens locais no NumIA; URLs remotas não são aceitas pelo servidor.');
       }
+      if (imageCounter.value >= config.MAX_FILES_PER_UPLOAD) {
+        throw new AppError(413, 'TOO_MANY_FILES', `Envie no máximo ${config.MAX_FILES_PER_UPLOAD} imagens por mensagem.`);
+      }
       imageCounter.value += 1;
-      const name = await saveDataImage(url, workingDirectory, imageCounter.value, config);
-      const absolutePath = path.join(workingDirectory, name);
-      imageCounter.paths.push(absolutePath);
+      const digest = crypto.createHash('sha256').update(url).digest('hex');
+      let absolutePath = imageCounter.cachedPaths.get(digest);
+      if (!absolutePath) {
+        const saved = await saveDataImage(
+          url,
+          workingDirectory,
+          imageCounter.paths.length + 1,
+          config,
+          config.MAX_TOTAL_IMAGE_BYTES - imageCounter.totalBytes
+        );
+        absolutePath = path.join(workingDirectory, saved.name);
+        imageCounter.totalBytes += saved.size;
+        imageCounter.paths.push(absolutePath);
+        imageCounter.cachedPaths.set(digest, absolutePath);
+      }
       pieces.push(`[Imagem anexada: @${absolutePath}]`);
     }
   }
@@ -110,11 +176,12 @@ async function contentToText(
 async function toolAwareMessageToText(
   message: OpenAIChatInput['messages'][number],
   workingDirectory: string,
-  imageCounter: { value: number; paths: string[] },
-  config: Config
+  imageCounter: ImageState,
+  config: Config,
+  selectedImages: WeakSet<object>
 ): Promise<string> {
   const raw = message as Record<string, unknown>;
-  const content = await contentToText(message.content, workingDirectory, imageCounter, config);
+  const content = await contentToText(message.content, workingDirectory, imageCounter, config, selectedImages);
   if (message.role === 'tool') {
     const toolCallId = typeof raw.tool_call_id === 'string' ? raw.tool_call_id.trim() : '';
     if (!toolCallId) throw new AppError(400, 'MISSING_TOOL_CALL_ID', 'Mensagem role=tool precisa de tool_call_id.');
@@ -145,20 +212,21 @@ export async function prepareOpenAIRequest(body: unknown, config: Config) {
   const root = path.join(config.dataDir, 'openai-temp');
   await fs.mkdir(root, { recursive: true, mode: 0o700 });
   const workingDirectory = await fs.mkdtemp(path.join(root, 'request-'));
-  const imageCounter = { value: 0, paths: [] as string[] };
+  const imageCounter: ImageState = { value: 0, paths: [], totalBytes: 0, cachedPaths: new Map() };
 
   try {
+    const selectedImages = selectImageParts(input, config.MAX_FILES_PER_UPLOAD);
     const toolContext = createOpenAIToolContext(input.tools, input.tool_choice, input.parallel_tool_calls);
     const turns: string[] = [];
     if (!toolContext) {
       for (const message of input.messages) {
-        const content = await contentToText(message.content, workingDirectory, imageCounter, config);
+        const content = await contentToText(message.content, workingDirectory, imageCounter, config, selectedImages);
         if (!content.trim()) continue;
         turns.push(`${message.role.toUpperCase()}:\n${content}`);
       }
     } else {
       for (const message of input.messages) {
-        const turn = await toolAwareMessageToText(message, workingDirectory, imageCounter, config);
+        const turn = await toolAwareMessageToText(message, workingDirectory, imageCounter, config, selectedImages);
         if (turn.trim()) turns.push(turn);
       }
     }
