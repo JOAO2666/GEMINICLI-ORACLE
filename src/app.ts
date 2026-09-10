@@ -19,6 +19,7 @@ import { AntigravityCLIProvider } from './services/antigravity-provider.js';
 import { AntigravityCommandRegistry } from './services/antigravity-command-registry.js';
 import type { AIProvider, ProviderEvent } from './types.js';
 import { openAIChunk, openAICompletion, openAIModelList, prepareOpenAIRequest } from './openai-compat.js';
+import { addLocalImageOcr } from './services/image-ocr.js';
 import { openAIToolCompletion, parseOpenAIToolDecision, type OpenAIToolDecision } from './openai-tools.js';
 import { McpAuthStore } from './mcp-auth.js';
 import { mcpPublicUrls, registerMcpOAuthRoutes } from './mcp-oauth-routes.js';
@@ -292,6 +293,18 @@ export async function buildApp(
     const model = prepared.imageCount > 0 && config.VISION_MODEL
       ? await validateAvailableModel(config.visionModel)
       : await validateAvailableModel(requestedModel);
+    let preparedPrompt: string;
+    try {
+      preparedPrompt = await addLocalImageOcr(
+        prepared.prompt,
+        model,
+        prepared.imagePaths,
+        config.IMAGE_OCR_TIMEOUT_MS
+      );
+    } catch (error) {
+      await prepared.cleanup();
+      throw error;
+    }
     request.log.info({ requestedModel, model, imageCount: prepared.imageCount }, 'OpenAI request routed');
     const id = `chatcmpl-${prepared.conversationId}`;
     const created = Math.floor(Date.now() / 1000);
@@ -325,7 +338,7 @@ export async function buildApp(
           let decision: OpenAIToolDecision | undefined;
           for await (const event of provider.streamMessage({
             conversationId: prepared.conversationId,
-            prompt: prepared.prompt,
+            prompt: preparedPrompt,
             model,
             workingDirectory: prepared.workingDirectory,
             autoApprove: prepared.imageCount > 0,
@@ -341,7 +354,7 @@ export async function buildApp(
         } else {
           const text = await provider.sendMessage({
             conversationId: prepared.conversationId,
-            prompt: prepared.prompt,
+            prompt: preparedPrompt,
             model,
             workingDirectory: prepared.workingDirectory,
             autoApprove: prepared.imageCount > 0,
@@ -385,7 +398,7 @@ export async function buildApp(
         let decision: OpenAIToolDecision | undefined;
         for await (const event of provider.streamMessage({
           conversationId: prepared.conversationId,
-          prompt: prepared.prompt,
+          prompt: preparedPrompt,
           model,
           workingDirectory: prepared.workingDirectory,
           autoApprove: prepared.imageCount > 0,
@@ -411,7 +424,7 @@ export async function buildApp(
       }
       for await (const event of provider.streamMessage({
         conversationId: prepared.conversationId,
-        prompt: prepared.prompt,
+        prompt: preparedPrompt,
         model,
         workingDirectory: prepared.workingDirectory,
         autoApprove: prepared.imageCount > 0,
@@ -476,7 +489,13 @@ export async function buildApp(
     const turn = chats.createUserTurn(input.conversationId, input.message, model, input.attachmentIds);
     const workingDirectory = files.conversationDirectory(input.conversationId);
     await fs.mkdir(workingDirectory, { recursive: true, mode: 0o700 });
-    const text = await provider.sendMessage({ conversationId: input.conversationId, prompt: turn.prompt, model, workingDirectory, signal });
+    const prompt = await addLocalImageOcr(
+      turn.prompt,
+      model,
+      turn.attachments.filter((item) => item.mime_type.startsWith('image/')).map((item) => item.stored_path),
+      config.IMAGE_OCR_TIMEOUT_MS
+    );
+    const text = await provider.sendMessage({ conversationId: input.conversationId, prompt, model, workingDirectory, signal });
     const assistant = db.addMessage(input.conversationId, 'assistant', text);
     return { conversationId: input.conversationId, message: assistant, text };
   }
@@ -487,6 +506,12 @@ export async function buildApp(
     const turn = chats.createUserTurn(input.conversationId, input.message, model, input.attachmentIds);
     const workingDirectory = files.conversationDirectory(input.conversationId);
     await fs.mkdir(workingDirectory, { recursive: true, mode: 0o700 });
+    const prompt = await addLocalImageOcr(
+      turn.prompt,
+      model,
+      turn.attachments.filter((item) => item.mime_type.startsWith('image/')).map((item) => item.stored_path),
+      config.IMAGE_OCR_TIMEOUT_MS
+    );
     const controller = new AbortController();
     let finished = false;
     reply.raw.on('close', () => { if (!finished) controller.abort(); });
@@ -499,7 +524,7 @@ export async function buildApp(
     });
     const emit = (event: ProviderEvent) => reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
     try {
-      for await (const event of provider.streamMessage({ conversationId: input.conversationId, prompt: turn.prompt, model, workingDirectory, signal: controller.signal })) {
+      for await (const event of provider.streamMessage({ conversationId: input.conversationId, prompt, model, workingDirectory, signal: controller.signal })) {
         emit(event);
         if (event.type === 'complete') {
           db.addMessage(input.conversationId, 'assistant', event.text);

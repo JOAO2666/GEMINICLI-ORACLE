@@ -30,6 +30,7 @@ const envSchema = z.object({
   MCP_AUTO_INSTALL_SKILLS: boolWithDefault(true),
   MAX_GEMINI_PROCESSES: positiveInt(2),
   AGY_TIMEOUT_MS: positiveInt(300_000),
+  IMAGE_OCR_TIMEOUT_MS: positiveInt(30_000),
   AGY_COMMAND: z.string().default('agy'),
   DATA_DIR: z.string().default(path.resolve('data')),
   MAX_UPLOAD_BYTES: positiveInt(25 * 1024 * 1024),

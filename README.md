@@ -61,6 +61,7 @@ Edite `.env`:
 - defina `DOMAIN` para o domínio público;
 - mantenha `DEFAULT_MODEL=gemini-3.8-flash-high` para usar o Gemini 3.8 Flash;
 - mantenha `VISION_MODEL` vazio para que o modelo escolhido processe tanto texto quanto imagens;
+- `gpt-oss-*` não possui visão nativa no Antigravity; nesses modelos o servidor usa OCR local gratuito para imagens com texto, sem trocar silenciosamente para outro modelo;
 - deixe `ALLOWED_MODELS` vazio para liberar automaticamente tudo que `agy models` oferecer (Gemini, Claude e GPT-OSS), ou preencha para restringir;
 - use `MAX_GEMINI_PROCESSES=1` em VM de 1 GB.
 
@@ -119,6 +120,31 @@ npm test
 ```
 
 Use um token de 32 caracteres ou mais. Em desenvolvimento, `REQUIRE_HTTPS` não bloqueia HTTP local. O binário `agy` precisa estar instalado e autenticado no mesmo ambiente.
+
+Para verificar no servidor real todos os modelos retornados pelo Antigravity, tanto com
+texto quanto com imagem, use uma foto de teste local:
+
+```bash
+npm run test:models -- https://seu-dominio.example caminho/para/foto.jpg
+```
+
+O comando lê `NUMIA_SERVER_TOKEN` do `.env`, nunca mostra a chave e confirma que a resposta
+foi produzida pelo mesmo modelo solicitado. Cada execução faz duas chamadas por modelo e,
+portanto, consome a cota normal da conta conectada.
+
+Gemini e Claude analisam a imagem nativamente. Para `gpt-oss-*`, o container usa Tesseract
+em português e inglês para extrair texto localmente e entrega esse texto ao próprio GPT-OSS;
+não existe roteamento para Gemini ou Claude. Isso funciona para provas, documentos e capturas
+de tela legíveis, mas não transforma o GPT-OSS em um modelo de visão para descrever cenas,
+gráficos sem rótulos ou outros detalhes puramente visuais. Se o OCR não encontrar texto, a API
+retorna `IMAGE_OCR_EMPTY` claramente. O limite por imagem pode ser ajustado com
+`IMAGE_OCR_TIMEOUT_MS` (padrão: 30000 ms).
+
+Para confirmar que o modelo realmente leu um detalhe visível, acrescente a pergunta e a
+resposta esperada depois do caminho da imagem. Também é possível usar as variáveis
+`MODEL_TEST_IMAGE_PROMPT` e `MODEL_TEST_EXPECTED`.
+Use `MODEL_TEST_FILTER=gpt-oss` para testar temporariamente apenas modelos cujo nome
+contenha esse trecho.
 
 ## Fluxo de uso
 

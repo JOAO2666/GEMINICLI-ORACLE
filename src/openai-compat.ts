@@ -73,7 +73,7 @@ async function saveDataImage(
 async function contentToText(
   content: unknown,
   workingDirectory: string,
-  imageCounter: { value: number },
+  imageCounter: { value: number; paths: string[] },
   config: Config
 ): Promise<string> {
   if (typeof content === 'string') return neutralizeCliShortcuts(content);
@@ -100,6 +100,7 @@ async function contentToText(
       imageCounter.value += 1;
       const name = await saveDataImage(url, workingDirectory, imageCounter.value, config);
       const absolutePath = path.join(workingDirectory, name);
+      imageCounter.paths.push(absolutePath);
       pieces.push(`[Imagem anexada: @${absolutePath}]`);
     }
   }
@@ -109,7 +110,7 @@ async function contentToText(
 async function toolAwareMessageToText(
   message: OpenAIChatInput['messages'][number],
   workingDirectory: string,
-  imageCounter: { value: number },
+  imageCounter: { value: number; paths: string[] },
   config: Config
 ): Promise<string> {
   const raw = message as Record<string, unknown>;
@@ -144,7 +145,7 @@ export async function prepareOpenAIRequest(body: unknown, config: Config) {
   const root = path.join(config.dataDir, 'openai-temp');
   await fs.mkdir(root, { recursive: true, mode: 0o700 });
   const workingDirectory = await fs.mkdtemp(path.join(root, 'request-'));
-  const imageCounter = { value: 0 };
+  const imageCounter = { value: 0, paths: [] as string[] };
 
   try {
     const toolContext = createOpenAIToolContext(input.tools, input.tool_choice, input.parallel_tool_calls);
@@ -181,6 +182,7 @@ export async function prepareOpenAIRequest(body: unknown, config: Config) {
       workingDirectory,
       conversationId: crypto.randomUUID(),
       imageCount: imageCounter.value,
+      imagePaths: [...imageCounter.paths],
       cleanup: () => fs.rm(workingDirectory, { recursive: true, force: true })
     };
   } catch (error) {
