@@ -14,12 +14,13 @@ afterEach(() => dirs.splice(0).forEach((dir) => fs.rmSync(dir, {
 })));
 
 const token = 'a'.repeat(64);
-function testConfig() {
+function testConfig(overrides: NodeJS.ProcessEnv = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'numia-tools-'));
   dirs.push(dir);
   return loadConfig({
     NODE_ENV: 'test', NUMIA_SERVER_TOKEN: token, DATA_DIR: dir,
-    ALLOWED_MODELS: 'gemini-3.7-flash-low', DEFAULT_MODEL: 'gemini-3.7-flash-low'
+    ALLOWED_MODELS: 'gemini-3.7-flash-low', DEFAULT_MODEL: 'gemini-3.7-flash-low',
+    ...overrides
   });
 }
 
@@ -107,6 +108,29 @@ describe('OpenAI Tool Calling', { timeout: 20_000 }, () => {
       expect(response.body).toContain('"finish_reason":"stop"');
       expect(response.body).toContain('data: [DONE]');
       expect(provider.streamed[0]?.jsonSchema).toBeUndefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it('keeps SSE clients alive while a model is silent before its first token', async () => {
+    const provider = new FakeProvider([], 'resposta depois da espera');
+    provider.streamMessage = async function* (request: ProviderRequest) {
+      this.streamed.push(request);
+      await new Promise((resolve) => setTimeout(resolve, 45));
+      yield { type: 'delta', text: 'resposta depois da espera' };
+      yield { type: 'complete', text: 'resposta depois da espera', conversationId: request.conversationId };
+    };
+    const app = await buildApp(testConfig({ STREAM_HEARTBEAT_MS: '10' }), { provider });
+    try {
+      const response = await app.inject({
+        method: 'POST', url: '/v1/chat/completions', headers: auth,
+        payload: { model: 'gemini-3.7-flash-low', stream: true, messages: [{ role: 'user', content: 'Olá' }] }
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.body).toContain(': keep-alive\n\n');
+      expect(response.body).toContain('resposta depois da espera');
+      expect(response.body).toContain('data: [DONE]');
     } finally {
       await app.close();
     }

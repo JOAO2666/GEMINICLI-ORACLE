@@ -140,6 +140,20 @@ gráficos sem rótulos ou outros detalhes puramente visuais. Se o OCR não encon
 retorna `IMAGE_OCR_EMPTY` claramente. O limite por imagem pode ser ajustado com
 `IMAGE_OCR_TIMEOUT_MS` (padrão: 30000 ms).
 
+Respostas OpenAI-compatible em SSE recebem um comentário `keep-alive` a cada
+`STREAM_HEARTBEAT_MS` (padrão: 5000 ms). Isso evita o timeout de leitura de 40 segundos do
+NumIA quando modelos mais lentos, como Gemini Pro, ficam muito tempo analisando várias
+imagens antes do primeiro token. O Caddy não comprime esses fluxos, para que cada heartbeat
+seja entregue imediatamente; HikkaHub, Gemini Spark e clientes SSE compatíveis simplesmente
+ignoram o comentário.
+
+Para reproduzir especificamente o fluxo do NumIA (`stream: true`, duas imagens e limite de
+40 segundos entre leituras), execute:
+
+```bash
+npm run test:numia-stream -- https://seu-dominio.example caminho/foto.jpg gemini-3.1-pro-high
+```
+
 Para confirmar que o modelo realmente leu um detalhe visível, acrescente a pergunta e a
 resposta esperada depois do caminho da imagem. Também é possível usar as variáveis
 `MODEL_TEST_IMAGE_PROMPT` e `MODEL_TEST_EXPECTED`.

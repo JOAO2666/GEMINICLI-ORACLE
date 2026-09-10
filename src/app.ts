@@ -331,7 +331,7 @@ export async function buildApp(
         // JSON permits leading whitespace. Sending a tiny chunk keeps clients
         // such as NumIA from treating a long model generation as a dead socket.
         reply.raw.write(' ');
-      }, 5_000);
+      }, config.STREAM_HEARTBEAT_MS);
       try {
         let completion: unknown;
         if (prepared.toolContext) {
@@ -392,6 +392,9 @@ export async function buildApp(
       'X-Accel-Buffering': 'no'
     });
     const emit = (payload: unknown) => reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
+    const heartbeat = setInterval(() => {
+      if (!finished && !reply.raw.destroyed) reply.raw.write(': keep-alive\n\n');
+    }, config.STREAM_HEARTBEAT_MS);
     emit(openAIChunk(id, created, model, { role: 'assistant', content: '' }));
     try {
       if (prepared.toolContext) {
@@ -440,6 +443,7 @@ export async function buildApp(
       reply.raw.write('data: [DONE]\n\n');
     } finally {
       finished = true;
+      clearInterval(heartbeat);
       await prepared.cleanup();
       if (!reply.raw.destroyed) reply.raw.end();
     }

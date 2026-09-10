@@ -12,6 +12,7 @@
     "start": "node dist/server.js",
     "test": "vitest run",
     "test:models": "node scripts/testar-modelos.mjs",
+    "test:numia-stream": "node scripts/testar-stream-numia.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
