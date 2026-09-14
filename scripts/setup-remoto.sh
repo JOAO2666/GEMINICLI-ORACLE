@@ -118,5 +118,10 @@ echo "Construindo e iniciando os servicos. Isso pode levar alguns minutos..."
 sudo docker compose up -d --build
 sudo docker compose ps
 
+if [[ -f "$INSTALL_DIR/scripts/configurar-modo-autonomo-oracle.sh" ]]; then
+  echo "Configurando o Modo Autônomo Codex no Antigravity CLI..."
+  bash "$INSTALL_DIR/scripts/configurar-modo-autonomo-oracle.sh" || true
+fi
+
 echo
 echo "Aplicacao instalada. O assistente do Windows continuara com o login Google."

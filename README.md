@@ -196,6 +196,11 @@ Permite conectar e controlar suas sessões de agentes diretamente de **qualquer 
 2. **Instância Dedicada**: O servidor na nuvem aparece listado automaticamente sob **Remote Control Instances** como **`oracle-pc`** (🟢 Online), com o botão **Connect**.
 3. **Persistência via systemd**: O daemon do CLI roda como serviço nativo do sistema (`antigravity-cli-daemon.service`) com *linger* ativo (`loginctl enable-linger opc`) e montagem persistente em `/etc/fstab`, sobrevivendo a reinicializações e desconexões SSH.
 4. **Gerenciador 1-Clique no Windows**: Execute [CONTROLE_REMOTO_ORACLE.bat](CONTROLE_REMOTO_ORACLE.bat) na raiz do projeto para auditar o status do daemon em tempo real.
+5. **Modo Autônomo Total (Estilo Codex - Zero Confirmações)**: Execute [MODO_AUTONOMO_CODEX.bat](MODO_AUTONOMO_CODEX.bat) para configurar o `oracle-pc` para executar todas as tarefas de ponta a ponta sem pedir aprovação ou permissão:
+   - Injeta `--dangerously-skip-permissions` e `--mode accept-edits` automaticamente via wrapper nativo e systemd.
+   - Define `autoExecutionPolicy: CASCADE_COMMANDS_AUTO_EXECUTION_EAGER` e concessões wildcard (`command(*)`, `read_file(*)`, `write_file(*)`, etc.) em `config.json`, `projects/outside-of-project.json` e `default-cli-project.json`.
+   - Permite leitura e escrita em qualquer workspace sem alertas manuais na interface mobile ou web.
+   - Instruções de agente `AGENTS.md` e `GEMINI.md` sincronizadas com a diretriz de autonomia total.
 
 ## Comandos MCP e Interface do Antigravity CLI
 
