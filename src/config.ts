@@ -60,7 +60,9 @@ const envSchema = z.object({
   MAX_WORKSPACE_BYTES: positiveInt(500 * 1024 * 1024),
   MCP_WORKER_ISOLATION: z.enum(['strict', 'compat']).default('compat'),
   TRUST_PROXY: bool,
-  REQUIRE_HTTPS: bool
+  REQUIRE_HTTPS: bool,
+  TELEGRAM_BOT_TOKEN: z.string().default(''),
+  TELEGRAM_CHAT_ID: z.string().default('')
 });
 
 export type Config = ReturnType<typeof loadConfig>;

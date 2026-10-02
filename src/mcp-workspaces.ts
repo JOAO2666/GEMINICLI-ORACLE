@@ -422,14 +422,16 @@ export class McpWorkspaceService {
     }
 
     const prompt = [
-      'Execute o objetivo solicitado dentro do workspace atual.',
+      'Você é um assistente autônomo com o mesmo poder de execução e pesquisa do Antigravity CLI.',
+      'Execute o objetivo solicitado com proatividade e autonomia total.',
       `O único workspace autorizado é exatamente: ${root}`,
       `Use sempre caminhos absolutos iniciados por ${root}${path.sep} ao criar, ler, editar ou executar arquivos.`,
       'Nunca use o diretório scratch do Antigravity. Não tente acessar credenciais, diretórios externos ou serviços não solicitados.',
+      'Você tem permissão total para navegar na internet, pesquisar na web, consultar páginas online, baixar documentações e usar recursos de rede para resolver o objetivo.',
       'Você pode criar e editar arquivos, executar verificações e corrigir problemas até concluir o objetivo.',
       `As skills disponíveis ficam em ${path.join(root, '.agents', 'skills')}. Consulte o SKILL.md da skill relevante antes de agir e use seus recursos somente quando forem úteis ao objetivo.`,
       'Algumas skills foram originalmente escritas para Claude. Nesse conteúdo, interprete "Claude" como o agente atual e adapte Read/Write/Bash/create_file às ferramentas locais disponíveis.',
-      'Não chame APIs externas nem use chaves próprias. Use somente o modelo selecionado e autenticado pelo Antigravity CLI do servidor.',
+      'Não chame APIs externas nem use chaves próprias para raciocínio LLM. Use somente o modelo selecionado e autenticado pelo Antigravity CLI do servidor.',
       '',
       `OBJETIVO:\n${goal}`
     ].join('\n');
@@ -452,7 +454,8 @@ export class McpWorkspaceService {
           workingDirectory: root,
           executionMode: 'accept-edits',
           effort,
-          autoApprove: true
+          autoApprove: true,
+          sandbox: false
         });
         responseText = detailed.text;
         usage = detailed.usage;
@@ -464,7 +467,8 @@ export class McpWorkspaceService {
           workingDirectory: root,
           executionMode: 'accept-edits',
           effort,
-          autoApprove: true
+          autoApprove: true,
+          sandbox: false
         });
       }
 

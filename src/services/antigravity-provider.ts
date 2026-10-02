@@ -231,7 +231,7 @@ export function buildAntigravityArgs(request: ProviderRequest, timeoutMs: number
     '--model', request.model,
     '--output-format', 'stream-json',
     '--mode', request.executionMode ?? 'plan',
-    '--sandbox',
+    ...(request.sandbox !== false ? ['--sandbox'] : []),
     '--print-timeout', `${timeoutSeconds}s`
   ];
   // The Antigravity CLI treats the -high/-medium/-low model suffix as an
@@ -390,12 +390,16 @@ export class AntigravityCLIProvider implements AIProvider {
     let result: ProviderResult = { text: '' };
     for await (const event of this.streamMessage(request)) {
       if (event.type === 'delta') result.text += event.text;
-      if (event.type === 'complete') result = {
-        text: event.text,
-        ...(event.stats !== undefined ? { usage: event.stats } : {}),
-        ...(event.structuredOutput !== undefined ? { structuredOutput: event.structuredOutput } : {}),
-        ...(event.sessionId ? { sessionId: event.sessionId } : {})
-      };
+      if (event.type === 'complete') {
+        const statsObj = (event.stats && typeof event.stats === 'object') ? event.stats as Record<string, unknown> : undefined;
+        result = {
+          text: event.text,
+          ...(event.stats !== undefined ? { usage: event.stats } : {}),
+          ...(typeof statsObj?.duration_seconds === 'number' ? { durationSeconds: statsObj.duration_seconds } : {}),
+          ...(event.structuredOutput !== undefined ? { structuredOutput: event.structuredOutput } : {}),
+          ...(event.sessionId ? { sessionId: event.sessionId } : {})
+        };
+      }
     }
     return result;
   }
@@ -465,10 +469,19 @@ export class AntigravityCLIProvider implements AIProvider {
               status: step.state === 'DONE' ? 'success' : 'running'
             } });
           }
+          if (step.usage && !stats) {
+            stats = {
+              ...objectValue(step.usage),
+              ...(typeof step.duration_seconds === 'number' ? { duration_seconds: step.duration_seconds } : {})
+            };
+          }
         } else if (event.event === 'result') {
           const result = objectValue(event.result);
           sessionId = typeof result.conversation_id === 'string' ? result.conversation_id : sessionId;
-          stats = result.usage;
+          stats = {
+            ...objectValue(result.usage || stats),
+            ...(typeof result.duration_seconds === 'number' ? { duration_seconds: result.duration_seconds } : {})
+          };
           structuredOutput = result.structured_output;
           if (typeof result.response === 'string') response = result.response;
           if (result.status !== 'SUCCESS') resultFailure = typeof result.error === 'string' ? result.error : `Status ${String(result.status)}`;

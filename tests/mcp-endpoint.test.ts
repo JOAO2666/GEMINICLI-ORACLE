@@ -80,7 +80,7 @@ describe('Remote MCP endpoint', () => {
         'goal_run', 'model_current', 'model_set', 'models', 'shell_execute',
         'skill_catalog', 'skill_install', 'skill_install_catalog', 'skill_list',
         'skill_read', 'skill_remove', 'skill_resources', 'status', 'storage_cleanup', 'storage_status', 'task_run', 'usage',
-        'usage_last', 'workspace_create', 'workspace_delete', 'workspace_info'
+        'usage_last', 'web_fetch', 'web_search', 'workspace_create', 'workspace_delete', 'workspace_info'
       ]);
       const created = await client.callTool({ name: 'workspace_create', arguments: { name: 'Integração' } });
       const workspaceId = String((created.structuredContent as Record<string, unknown>).id);
@@ -95,6 +95,9 @@ describe('Remote MCP endpoint', () => {
 
       const commandsCall = await client.callTool({ name: 'commands', arguments: {} });
       expect(commandsCall.structuredContent).toBeDefined();
+
+      const webSearchCall = await client.callTool({ name: 'web_search', arguments: { query: 'test' } });
+      expect(webSearchCall.content).toBeDefined();
     } finally {
       await client.close();
       await app.close();

@@ -293,11 +293,18 @@ export function parseOpenAIToolDecision(
   return { type: 'tool_calls', toolCalls };
 }
 
-export function openAIToolCompletion(id: string, created: number, model: string, decision: OpenAIToolDecision) {
+export function openAIToolCompletion(
+  id: string,
+  created: number,
+  model: string,
+  decision: OpenAIToolDecision,
+  usage?: Record<string, unknown>
+) {
   if (decision.type === 'message') {
     return {
       id, object: 'chat.completion', created, model,
-      choices: [{ index: 0, message: { role: 'assistant', content: decision.content }, finish_reason: 'stop' }]
+      choices: [{ index: 0, message: { role: 'assistant', content: decision.content }, finish_reason: 'stop' }],
+      ...(usage ? { usage } : {})
     };
   }
   return {
@@ -306,6 +313,7 @@ export function openAIToolCompletion(id: string, created: number, model: string,
       index: 0,
       message: { role: 'assistant', content: null, tool_calls: decision.toolCalls },
       finish_reason: 'tool_calls'
-    }]
+    }],
+    ...(usage ? { usage } : {})
   };
 }

@@ -3,7 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
-import { openAIChunk, openAIModelList, prepareOpenAIRequest } from '../src/openai-compat.js';
+import {
+  formatOpenAIUsage,
+  openAIChunk,
+  openAIModelList,
+  openAIUsageChunk,
+  prepareOpenAIRequest
+} from '../src/openai-compat.js';
 
 const dirs: string[] = [];
 afterEach(() => dirs.splice(0).forEach((dir) => fs.rmSync(dir, { recursive: true, force: true })));
@@ -112,5 +118,41 @@ describe('OpenAI compatibility', () => {
     expect(openAIChunk('id', 1, 'modelo', { content: 'OK' }).choices[0]).toMatchObject({
       delta: { content: 'OK' }, finish_reason: null
     });
+  });
+
+  it('formats OpenAI usage with token counts and latency correctly', () => {
+    const usage = formatOpenAIUsage(
+      { input_tokens: 12500, output_tokens: 350, thinking_tokens: 120, cache_read_tokens: 50 },
+      'prompt longo',
+      'resposta',
+      2.456
+    );
+    expect(usage).toEqual({
+      prompt_tokens: 12500,
+      completion_tokens: 350,
+      total_tokens: 12850,
+      completion_tokens_details: { reasoning_tokens: 120 },
+      prompt_tokens_details: { cached_tokens: 50 },
+      duration_seconds: 2.456,
+      total_duration_ms: 2456
+    });
+
+    const fallbackUsage = formatOpenAIUsage(undefined, 'abcd', 'efgh', 1.0);
+    expect(fallbackUsage.prompt_tokens).toBeGreaterThan(0);
+    expect(fallbackUsage.completion_tokens).toBeGreaterThan(0);
+    expect(fallbackUsage.total_tokens).toBe(fallbackUsage.prompt_tokens + fallbackUsage.completion_tokens);
+    expect(fallbackUsage.duration_seconds).toBe(1.0);
+    expect(fallbackUsage.total_duration_ms).toBe(1000);
+  });
+
+  it('includes usage in final chunk and dedicated usage chunk', () => {
+    const usage = formatOpenAIUsage({ input_tokens: 100, output_tokens: 50 });
+    const stopChunk = openAIChunk('id', 1, 'modelo', {}, 'stop', usage);
+    expect(stopChunk.choices[0]?.finish_reason).toBe('stop');
+    expect(stopChunk.usage).toMatchObject({ prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 });
+
+    const usageChunk = openAIUsageChunk('id', 1, 'modelo', usage);
+    expect(usageChunk.choices).toEqual([]);
+    expect(usageChunk.usage).toMatchObject({ prompt_tokens: 100, completion_tokens: 50 });
   });
 });

@@ -24,6 +24,7 @@ export interface ProviderRequest {
   effort?: 'low' | 'medium' | 'high';
   autoApprove?: boolean;
   jsonSchema?: Record<string, unknown>;
+  sandbox?: boolean;
 }
 
 export interface ProviderStatus {

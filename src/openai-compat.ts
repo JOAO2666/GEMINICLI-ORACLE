@@ -31,33 +31,58 @@ export type OpenAIChatInput = z.infer<typeof openAIChatSchema>;
 const imageExtensions = new Map([
   ['image/jpeg', '.jpg'],
   ['image/png', '.png'],
-  ['image/webp', '.webp']
+  ['image/webp', '.webp'],
+  ['image/gif', '.gif'],
+  ['image/bmp', '.bmp']
 ]);
 
 function neutralizeCliShortcuts(text: string): string {
   return text.replaceAll('@', '@\u200B').replaceAll('!', '!\u200B');
 }
 
-async function saveDataImage(
+async function saveImage(
   url: string,
   workingDirectory: string,
   index: number,
   config: Config,
   remainingTotalBytes: number
 ): Promise<{ name: string; size: number }> {
-  const match = /^data:(image\/(?:jpeg|png|webp));base64,([\s\S]+)$/i.exec(url);
-  if (!match?.[1] || !match[2]) {
-    throw new AppError(415, 'UNSUPPORTED_IMAGE', 'O NumIA enviou uma imagem em formato não suportado.');
+  let buffer: Buffer;
+  let mime: string | undefined;
+
+  if (url.startsWith('data:')) {
+    const match = /^data:(image\/(?:jpeg|png|webp|gif|bmp));base64,([\s\S]+)$/i.exec(url);
+    if (!match?.[1] || !match[2]) {
+      throw new AppError(415, 'UNSUPPORTED_IMAGE', 'Formato de imagem não suportado. Envie PNG, JPEG ou WEBP.');
+    }
+    mime = match[1].toLowerCase();
+    const encoded = match[2].replace(/\s+/g, '');
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
+      throw new AppError(400, 'INVALID_IMAGE_DATA', 'A imagem enviada contém Base64 inválido.');
+    }
+    if (Math.ceil(encoded.length * 0.75) > config.MAX_UPLOAD_BYTES) {
+      throw new AppError(413, 'FILE_TOO_LARGE', 'Imagem maior que o limite permitido.');
+    }
+    buffer = Buffer.from(encoded, 'base64');
+  } else if (/^https?:\/\//i.test(url)) {
+    try {
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(15_000),
+        headers: { 'User-Agent': 'Mozilla/5.0 (NumIA-OpenAI-Compat/2.0)' }
+      });
+      if (!res.ok) {
+        throw new AppError(400, 'IMAGE_DOWNLOAD_FAILED', `Falha ao baixar imagem remota: HTTP ${res.status}`);
+      }
+      const arrayBuffer = await res.arrayBuffer();
+      buffer = Buffer.from(arrayBuffer);
+    } catch (err: unknown) {
+      if (err instanceof AppError) throw err;
+      throw new AppError(400, 'IMAGE_DOWNLOAD_FAILED', `Não foi possível baixar imagem remota: ${(err as Error).message}`);
+    }
+  } else {
+    throw new AppError(400, 'INVALID_IMAGE_URL', 'URL de imagem inválida. Envie base64 data:image/... ou URL http(s)://');
   }
-  const mime = match[1].toLowerCase();
-  const encoded = match[2].replace(/\s+/g, '');
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) {
-    throw new AppError(400, 'INVALID_IMAGE_DATA', 'A imagem enviada pelo NumIA contém Base64 inválido.');
-  }
-  if (Math.ceil(encoded.length * 0.75) > config.MAX_UPLOAD_BYTES) {
-    throw new AppError(413, 'FILE_TOO_LARGE', 'Imagem maior que o limite permitido.');
-  }
-  const buffer = Buffer.from(encoded, 'base64');
+
   if (buffer.length === 0 || buffer.length > config.MAX_UPLOAD_BYTES) {
     throw new AppError(buffer.length ? 413 : 400, buffer.length ? 'FILE_TOO_LARGE' : 'EMPTY_FILE', 'Imagem inválida ou maior que o limite permitido.');
   }
@@ -65,10 +90,7 @@ async function saveDataImage(
     throw new AppError(413, 'IMAGES_TOO_LARGE', 'O tamanho total das imagens ultrapassa o limite permitido por envio.');
   }
   const detected = await fileTypeFromBuffer(buffer);
-  const extension = detected ? imageExtensions.get(detected.mime) : undefined;
-  if (!extension || detected?.mime !== mime) {
-    throw new AppError(415, 'INVALID_IMAGE_TYPE', 'O conteúdo da imagem não corresponde ao tipo informado.');
-  }
+  const extension = detected ? (imageExtensions.get(detected.mime) ?? '.png') : (mime ? (imageExtensions.get(mime) ?? '.png') : '.png');
   const name = `numia-image-${index}${extension}`;
   await fs.writeFile(path.join(workingDirectory, name), buffer, { mode: 0o600, flag: 'wx' });
   return { name, size: buffer.length };
@@ -144,9 +166,11 @@ async function contentToText(
         continue;
       }
       const image = part.image_url;
-      const url = image && typeof image === 'object' ? (image as Record<string, unknown>).url : undefined;
-      if (typeof url !== 'string' || !url.startsWith('data:')) {
-        throw new AppError(400, 'REMOTE_IMAGE_NOT_ALLOWED', 'Use imagens locais no NumIA; URLs remotas não são aceitas pelo servidor.');
+      const url = typeof image === 'string'
+        ? image
+        : (image && typeof image === 'object' ? (image as Record<string, unknown>).url : undefined);
+      if (typeof url !== 'string' || (!url.startsWith('data:') && !/^https?:\/\//i.test(url))) {
+        throw new AppError(400, 'INVALID_IMAGE_URL', 'URL de imagem inválida. Use base64 data:image/... ou URL http(s)://');
       }
       if (imageCounter.value >= config.MAX_FILES_PER_UPLOAD) {
         throw new AppError(413, 'TOO_MANY_FILES', `Envie no máximo ${config.MAX_FILES_PER_UPLOAD} imagens por mensagem.`);
@@ -155,7 +179,7 @@ async function contentToText(
       const digest = crypto.createHash('sha256').update(url).digest('hex');
       let absolutePath = imageCounter.cachedPaths.get(digest);
       if (!absolutePath) {
-        const saved = await saveDataImage(
+        const saved = await saveImage(
           url,
           workingDirectory,
           imageCounter.paths.length + 1,
@@ -266,22 +290,123 @@ export function openAIModelList(models: string[]) {
   };
 }
 
-export function openAIChunk(id: string, created: number, model: string, delta: Record<string, unknown>, finishReason: string | null = null) {
+export interface OpenAIUsage {
+  [key: string]: unknown;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  completion_tokens_details?: {
+    reasoning_tokens?: number;
+    [key: string]: unknown;
+  };
+  prompt_tokens_details?: {
+    cached_tokens?: number;
+    [key: string]: unknown;
+  };
+  duration_seconds?: number;
+  total_duration_ms?: number;
+}
+
+export function formatOpenAIUsage(
+  rawStats: unknown,
+  promptText = '',
+  responseText = '',
+  durationSeconds?: number
+): OpenAIUsage {
+  const stats = (rawStats && typeof rawStats === 'object') ? rawStats as Record<string, unknown> : {};
+
+  const promptTokens = typeof stats.input_tokens === 'number' && stats.input_tokens > 0
+    ? stats.input_tokens
+    : (typeof stats.prompt_tokens === 'number' && stats.prompt_tokens > 0
+      ? stats.prompt_tokens
+      : Math.max(1, Math.ceil(promptText.length / 4)));
+
+  const completionTokens = typeof stats.output_tokens === 'number' && stats.output_tokens >= 0
+    ? stats.output_tokens
+    : (typeof stats.completion_tokens === 'number' && stats.completion_tokens >= 0
+      ? stats.completion_tokens
+      : Math.max(0, Math.ceil(responseText.length / 4)));
+
+  const totalTokens = typeof stats.total_tokens === 'number' && stats.total_tokens > 0
+    ? stats.total_tokens
+    : promptTokens + completionTokens;
+
+  const thinkingTokens = typeof stats.thinking_tokens === 'number'
+    ? stats.thinking_tokens
+    : (stats.completion_tokens_details && typeof (stats.completion_tokens_details as Record<string, unknown>).reasoning_tokens === 'number'
+      ? (stats.completion_tokens_details as Record<string, unknown>).reasoning_tokens as number
+      : undefined);
+
+  const cachedTokens = typeof stats.cache_read_tokens === 'number'
+    ? stats.cache_read_tokens
+    : (stats.prompt_tokens_details && typeof (stats.prompt_tokens_details as Record<string, unknown>).cached_tokens === 'number'
+      ? (stats.prompt_tokens_details as Record<string, unknown>).cached_tokens as number
+      : undefined);
+
+  const duration = typeof durationSeconds === 'number'
+    ? durationSeconds
+    : (typeof stats.duration_seconds === 'number' ? stats.duration_seconds : undefined);
+
   return {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: totalTokens,
+    ...(thinkingTokens !== undefined ? { completion_tokens_details: { reasoning_tokens: thinkingTokens } } : {}),
+    ...(cachedTokens !== undefined ? { prompt_tokens_details: { cached_tokens: cachedTokens } } : {}),
+    ...(duration !== undefined ? { duration_seconds: Number(duration.toFixed(3)), total_duration_ms: Math.round(duration * 1000) } : {})
+  };
+}
+
+export function openAIChunk(
+  id: string,
+  created: number,
+  model: string,
+  delta: Record<string, unknown>,
+  finishReason: string | null = null,
+  usage?: Record<string, unknown> | null
+) {
+  const chunk: Record<string, unknown> = {
     id,
     object: 'chat.completion.chunk',
     created,
     model,
     choices: [{ index: 0, delta, finish_reason: finishReason }]
   };
+  if (usage) {
+    chunk.usage = usage;
+  }
+  return chunk;
 }
 
-export function openAICompletion(id: string, created: number, model: string, text: string) {
+export function openAIUsageChunk(
+  id: string,
+  created: number,
+  model: string,
+  usage: Record<string, unknown>
+) {
+  return {
+    id,
+    object: 'chat.completion.chunk',
+    created,
+    model,
+    choices: [],
+    usage
+  };
+}
+
+export function openAICompletion(
+  id: string,
+  created: number,
+  model: string,
+  text: string,
+  usage?: Record<string, unknown>
+) {
   return {
     id,
     object: 'chat.completion',
     created,
     model,
-    choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }]
+    choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: 'stop' }],
+    ...(usage ? { usage } : {})
   };
 }

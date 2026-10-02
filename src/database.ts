@@ -158,6 +158,27 @@ export class AppDatabase {
       })();
     }
 
+    if (currentVersion < 4) {
+      this.db.transaction(() => {
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS approvals (
+            id TEXT PRIMARY KEY,
+            conversationId TEXT,
+            action TEXT NOT NULL,
+            details TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            context_data TEXT,
+            result TEXT,
+            updated_at DATETIME
+          );
+          CREATE INDEX IF NOT EXISTS idx_approvals_conversation ON approvals(conversationId);
+          CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
+        `);
+        this.db.pragma('user_version = 4');
+      })();
+    }
+
     // Mark previously running jobs as interrupted upon server startup
     const now = new Date().toISOString();
     this.db.prepare("UPDATE jobs SET status = 'interrupted', updated_at = ?, finished_at = ? WHERE status = 'running'")
@@ -353,6 +374,8 @@ export class AppDatabase {
       'SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?'
     ).all(limit) as JobRecord[];
   }
+
+  getRawDb(): Database.Database { return this.db; }
 
   close(): void { this.db.close(); }
 }

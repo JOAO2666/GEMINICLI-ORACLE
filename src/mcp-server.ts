@@ -7,6 +7,7 @@ import type { AIProvider } from './types.js';
 import { AntigravityCommandRegistry } from './services/antigravity-command-registry.js';
 import { formatUsageBars } from './services/antigravity-provider.js';
 import { McpWorkspaceService } from './mcp-workspaces.js';
+import { searchWeb, fetchWebContent } from './services/web-search.js';
 
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const localWrite = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
@@ -117,8 +118,8 @@ export function createWorkspaceMcpEndpoint(
       guarded(() => workspaces.editFile(workspace_id, path, old_text, new_text, replace_all)));
 
     server.registerTool('shell_execute', {
-      title: 'Executar comando isolado',
-      description: 'Executa um comando em um contêiner isolado, limitado ao workspace e sem credenciais do servidor. Ferramenta low-level para build, testes e compilação; prefira ferramentas de alto nível (artifact_create, task_run) quando disponíveis.',
+      title: 'Executar comando bash',
+      description: 'Executa um comando bash dentro do workspace com acesso à rede liberado (curl, wget, git, npm, pip). Ferramenta para scripts, compilações, testes, automações e requisições externas.',
       inputSchema: z.object({
         workspace_id: z.string().uuid().describe('ID do workspace'),
         command: z.string().min(1).max(4_000).describe('Comando bash a ser executado'),
@@ -140,9 +141,61 @@ export function createWorkspaceMcpEndpoint(
     }, ({ workspace_id, repository_url, destination, ref }) =>
       guarded(() => workspaces.gitClone(workspace_id, repository_url, destination, ref)));
 
+    server.registerTool('web_search', {
+      title: 'Pesquisar na internet (Web Search)',
+      description: 'Pesquisa na web em tempo real por termos de busca, notícias recentes, documentações técnicas ou qualquer informação online. Retorna títulos, URLs e resumos dos melhores resultados encontrados.',
+      inputSchema: z.object({
+        query: z.string().min(1).max(500).describe('Termo de pesquisa a ser buscado na internet'),
+        num_results: z.number().int().min(1).max(20).default(8).describe('Número máximo de resultados a retornar')
+      }),
+      annotations: readOnly
+    }, ({ query, num_results }) => guardedFormatted(async () => {
+      const res = await searchWeb(query, num_results);
+      if (res.results.length === 0) {
+        return {
+          text: `Nenhum resultado encontrado para "${query}".`,
+          data: res as unknown as Record<string, unknown>
+        };
+      }
+      const lines = [
+        `# Resultados da pesquisa web para: "${query}"`,
+        `Encontrados ${res.results.length} resultados:\n`,
+        ...res.results.map((r, i) => `${i + 1}. **[${r.title}](${r.url})**\n   ${r.snippet}\n`)
+      ];
+      return {
+        text: lines.join('\n'),
+        data: res as unknown as Record<string, unknown>
+      };
+    }));
+
+    server.registerTool('web_fetch', {
+      title: 'Acessar página da web (Web Fetch)',
+      description: 'Acessa uma URL pública na internet e retorna o conteúdo textual limpo e legível da página em formato Markdown. Ideal para ler páginas, documentações, artigos, APIs e dados da internet.',
+      inputSchema: z.object({
+        url: z.string().url().max(2000).describe('URL pública http:// ou https:// da página a ser lida'),
+        max_length: z.number().int().min(500).max(100_000).default(30_000).describe('Tamanho máximo em caracteres do conteúdo retornado')
+      }),
+      annotations: readOnly
+    }, ({ url, max_length }) => guardedFormatted(async () => {
+      const res = await fetchWebContent(url, max_length);
+      const lines = [
+        `# ${res.title || res.url}`,
+        `**Status HTTP**: ${res.status} | **URL**: ${res.url}`,
+        `**Tipo de Conteúdo**: ${res.contentType} | **Tamanho**: ${res.contentLength} caracteres`,
+        '',
+        '---',
+        '',
+        res.text
+      ];
+      return {
+        text: lines.join('\n'),
+        data: res as unknown as Record<string, unknown>
+      };
+    }));
+
     server.registerTool('goal_run', {
       title: 'Executar objetivo automaticamente',
-      description: 'Delega um objetivo autônomo ao agente Gemini dentro do workspace. Ferramenta avançada para tarefas personalizadas. Prefira artifact_create para criação de documentos (PDF, DOCX, XLSX, PPTX, APKG) e task_run para tarefas orquestradas.',
+      description: 'Delega um objetivo autônomo ao agente Gemini com autonomia completa (estilo CLI), incluindo pesquisa na internet, navegação web, execução de comandos, criação de arquivos e diagnósticos. Use para qualquer tarefa que precise de autonomia total do agente.',
       inputSchema: z.object({
         workspace_id: z.string().uuid().describe('ID do workspace'),
         goal: z.string().min(1).max(40_000).describe('Objetivo completo a ser executado pelo agente'),
@@ -244,7 +297,7 @@ export function createWorkspaceMcpEndpoint(
 
     server.registerTool('task_run', {
       title: 'Executar tarefa orquestrada no workspace',
-      description: 'Orquestrador de alto nível para tarefas completas de desenvolvimento, automação e correção. Prepara o workspace, opcionalmente clona repositórios GitHub, executa os objetivos e compila arquivos alterados e artefatos. Use para pedidos como "Clone este repositório, encontre o erro e corrija", "Refatore o projeto e rode os testes".',
+      description: 'Orquestrador de alto nível para tarefas completas de desenvolvimento, pesquisa na internet, automação e correção. Prepara o workspace, opcionalmente clona repositórios GitHub, pesquisa informações online se necessário, executa os objetivos e compila arquivos alterados e artefatos.',
       inputSchema: z.object({
         request: z.string().min(1).max(40_000).describe('Descrição completa da tarefa a ser executada'),
         workspace_id: z.string().uuid().optional().describe('ID do workspace existente. Se omitido, um novo workspace é criado'),
@@ -298,6 +351,7 @@ export function createWorkspaceMcpEndpoint(
         { command: '/storage', description: 'Exibe o status do armazenamento e uso de disco do servidor' }
       ];
       const workspaceTools = [
+        'web_search', 'web_fetch',
         'artifact_create', 'task_run', 'artifact_revise', 'artifact_get',
         'workspace_create', 'workspace_delete', 'workspace_info', 'file_list', 'file_read',
         'file_write', 'file_edit', 'shell_execute', 'git_clone', 'goal_run', 'skill_list',

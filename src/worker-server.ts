@@ -119,6 +119,7 @@ export async function buildWorkerApp(options: WorkerAppOptions = {}): Promise<Fa
         '--proc', '/proc',
         '--dev', '/dev',
         '--unshare-all',
+        '--share-net',
         '--die-with-parent',
         '--chdir', cwd,
         '--',

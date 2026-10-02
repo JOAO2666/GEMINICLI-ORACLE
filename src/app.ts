@@ -18,7 +18,14 @@ import { FileService } from './services/files.js';
 import { AntigravityCLIProvider } from './services/antigravity-provider.js';
 import { AntigravityCommandRegistry } from './services/antigravity-command-registry.js';
 import type { AIProvider, ProviderEvent } from './types.js';
-import { openAIChunk, openAICompletion, openAIModelList, prepareOpenAIRequest } from './openai-compat.js';
+import {
+  formatOpenAIUsage,
+  openAIChunk,
+  openAICompletion,
+  openAIModelList,
+  openAIUsageChunk,
+  prepareOpenAIRequest
+} from './openai-compat.js';
 import { addLocalImageOcr } from './services/image-ocr.js';
 import { openAIToolCompletion, parseOpenAIToolDecision, type OpenAIToolDecision } from './openai-tools.js';
 import { McpAuthStore } from './mcp-auth.js';
@@ -27,6 +34,17 @@ import { createWorkspaceMcpEndpoint, type McpEndpoint } from './mcp-server.js';
 import { McpWorkspaceService } from './mcp-workspaces.js';
 import { detectMimeType, verifyArtifactUrl } from './services/artifact-service.js';
 import { StorageGuardian } from './services/storage-guardian.js';
+import {
+  SENSITIVE_TOOLS,
+  sendApproval,
+  getApproval,
+  listApprovals,
+  resumeApprovalExecution,
+  handleTelegramWebhook,
+  setDatabase,
+  registerResumptionHandler,
+  initTelegramBot
+} from './telegram.js';
 
 function tokenMatches(header: string | undefined, expected: string): boolean {
   if (!header?.startsWith('Bearer ')) return false;
@@ -69,6 +87,66 @@ export async function buildApp(
   const provider = options.provider ?? new AntigravityCLIProvider(config);
   const commandRegistry = options.commandRegistry ?? new AntigravityCommandRegistry(config);
   const storageGuardian = options.storageGuardian ?? new StorageGuardian(config, db);
+
+  // Inicialização do módulo de aprovação via Telegram (estilo Muse)
+  if (config.TELEGRAM_BOT_TOKEN) {
+    process.env.TELEGRAM_BOT_TOKEN = config.TELEGRAM_BOT_TOKEN;
+  }
+  if (config.TELEGRAM_CHAT_ID) {
+    process.env.TELEGRAM_CHAT_ID = config.TELEGRAM_CHAT_ID;
+  }
+  setDatabase(db.getRawDb());
+  initTelegramBot(config.TELEGRAM_BOT_TOKEN);
+  registerResumptionHandler(async (approval, contextData) => {
+    app.log.info({ approvalId: approval.id, action: approval.action }, 'Iniciando retomada de execução Antigravity CLI após aprovação');
+    const workingDirectory = (typeof contextData.workingDirectory === 'string' && contextData.workingDirectory)
+      ? contextData.workingDirectory
+      : files.conversationDirectory(approval.conversationId);
+    await fs.mkdir(workingDirectory, { recursive: true, mode: 0o700 });
+
+    const model = (typeof contextData.model === 'string' && contextData.model)
+      ? contextData.model
+      : config.DEFAULT_MODEL;
+
+    const basePrompt = typeof contextData.prompt === 'string' ? contextData.prompt : '';
+    const continuationPrompt = [
+      basePrompt,
+      '',
+      '=== SISTEMA DE APROVAÇÃO HUMANA (ESTILO MUSE VIA TELEGRAM) ===',
+      `Ação sensível autorizada: "${approval.action}".`,
+      `Parâmetros aprovados pelo usuário: ${approval.details}`,
+      'A autorização foi concedida formalmente via Telegram. Prossiga imediatamente com a tarefa, execute a ação aprovada e conclua a resposta final ao usuário.'
+    ].join('\n');
+
+    let responseText = '';
+    if (provider.sendMessageDetailed) {
+      const detailed = await provider.sendMessageDetailed({
+        conversationId: approval.conversationId,
+        prompt: continuationPrompt,
+        model,
+        workingDirectory,
+        autoApprove: true
+      });
+      responseText = detailed.text;
+    } else {
+      responseText = await provider.sendMessage({
+        conversationId: approval.conversationId,
+        prompt: continuationPrompt,
+        model,
+        workingDirectory,
+        autoApprove: true
+      });
+    }
+
+    try {
+      db.addMessage(approval.conversationId, 'assistant', responseText);
+    } catch {
+      // Conversa efêmera ou gerada fora do banco
+    }
+
+    return responseText;
+  });
+
   provider.onCatalogUpdate?.(() => {
     commandRegistry.invalidate();
   });
@@ -316,6 +394,7 @@ export async function buildApp(
     request.log.info({ requestedModel, model, imageCount: prepared.imageCount }, 'OpenAI request routed');
     const id = `chatcmpl-${prepared.conversationId}`;
     const created = Math.floor(Date.now() / 1000);
+    const requestStartTime = Date.now();
 
     if (!prepared.input.stream) {
       const controller = new AbortController();
@@ -342,6 +421,9 @@ export async function buildApp(
       }, config.STREAM_HEARTBEAT_MS);
       try {
         let completion: unknown;
+        let lastStats: unknown;
+        let durationSeconds: number | undefined;
+
         if (prepared.toolContext) {
           let decision: OpenAIToolDecision | undefined;
           for await (const event of provider.streamMessage({
@@ -354,22 +436,79 @@ export async function buildApp(
             signal: controller.signal
           })) {
             if (event.type === 'complete') {
+              lastStats = event.stats;
               decision = parseOpenAIToolDecision(event.structuredOutput, event.text, prepared.toolContext);
             }
           }
           if (!decision) throw new AppError(502, 'MISSING_TOOL_DECISION', 'O modelo não concluiu a decisão de ferramenta.');
-          completion = openAIToolCompletion(id, created, model, decision);
+
+          // Interceptação de ferramentas sensíveis estilo Muse via Telegram
+          if (decision.type === 'tool_calls') {
+            const sensitiveCall = decision.toolCalls.find((call) =>
+              SENSITIVE_TOOLS.some((s) => s.toLowerCase() === call.function.name.toLowerCase())
+            );
+            if (sensitiveCall) {
+              const approvalContext = {
+                conversationId: prepared.conversationId,
+                model,
+                workingDirectory: prepared.workingDirectory,
+                prompt: preparedPrompt,
+                toolCall: sensitiveCall,
+                imageCount: prepared.imageCount,
+                id,
+                created
+              };
+              const approvalId = await sendApproval(
+                prepared.conversationId,
+                sensitiveCall.function.name,
+                sensitiveCall.function.arguments,
+                approvalContext
+              );
+              const awaitingResponse = {
+                status: 'AWAITING_APPROVAL',
+                approvalId,
+                message: 'Aguardando aprovação no Telegram'
+              };
+              if (!rawResponseStarted) return awaitingResponse;
+              if (!reply.raw.destroyed) reply.raw.end(JSON.stringify(awaitingResponse));
+              return;
+            }
+          }
+
+          durationSeconds = (Date.now() - requestStartTime) / 1000;
+          const usage = formatOpenAIUsage(lastStats, preparedPrompt, decision.type === 'message' ? decision.content : '', durationSeconds);
+          completion = openAIToolCompletion(id, created, model, decision, usage);
         } else {
-          const text = await provider.sendMessage({
-            conversationId: prepared.conversationId,
-            prompt: preparedPrompt,
-            model,
-            workingDirectory: prepared.workingDirectory,
-            autoApprove: prepared.imageCount > 0,
-            signal: controller.signal
-          });
-          completion = openAICompletion(id, created, model, text);
+          let text = '';
+          if (provider.sendMessageDetailed) {
+            const detailed = await provider.sendMessageDetailed({
+              conversationId: prepared.conversationId,
+              prompt: preparedPrompt,
+              model,
+              workingDirectory: prepared.workingDirectory,
+              autoApprove: prepared.imageCount > 0,
+              signal: controller.signal
+            });
+            text = detailed.text;
+            lastStats = detailed.usage;
+            durationSeconds = detailed.durationSeconds;
+          } else {
+            text = await provider.sendMessage({
+              conversationId: prepared.conversationId,
+              prompt: preparedPrompt,
+              model,
+              workingDirectory: prepared.workingDirectory,
+              autoApprove: prepared.imageCount > 0,
+              signal: controller.signal
+            });
+          }
+          if (durationSeconds === undefined) {
+            durationSeconds = (Date.now() - requestStartTime) / 1000;
+          }
+          const usage = formatOpenAIUsage(lastStats, preparedPrompt, text, durationSeconds);
+          completion = openAICompletion(id, created, model, text, usage);
         }
+        reply.header('openai-processing-ms', Math.round((durationSeconds ?? ((Date.now() - requestStartTime) / 1000)) * 1000));
         if (!rawResponseStarted) return completion;
         if (!reply.raw.destroyed) reply.raw.end(JSON.stringify(completion));
         return;
@@ -407,6 +546,7 @@ export async function buildApp(
     try {
       if (prepared.toolContext) {
         let decision: OpenAIToolDecision | undefined;
+        let lastStats: unknown;
         for await (const event of provider.streamMessage({
           conversationId: prepared.conversationId,
           prompt: preparedPrompt,
@@ -417,22 +557,61 @@ export async function buildApp(
           signal: controller.signal
         })) {
           if (event.type === 'complete') {
+            lastStats = event.stats;
             decision = parseOpenAIToolDecision(event.structuredOutput, event.text, prepared.toolContext);
           }
         }
         if (!decision) throw new AppError(502, 'MISSING_TOOL_DECISION', 'O modelo não concluiu a decisão de ferramenta.');
+
+        // Interceptação de ferramentas sensíveis estilo Muse via Telegram em streaming
+        if (decision.type === 'tool_calls') {
+          const sensitiveCall = decision.toolCalls.find((call) =>
+            SENSITIVE_TOOLS.some((s) => s.toLowerCase() === call.function.name.toLowerCase())
+          );
+          if (sensitiveCall) {
+            const approvalContext = {
+              conversationId: prepared.conversationId,
+              model,
+              workingDirectory: prepared.workingDirectory,
+              prompt: preparedPrompt,
+              toolCall: sensitiveCall,
+              imageCount: prepared.imageCount,
+              id,
+              created
+            };
+            const approvalId = await sendApproval(
+              prepared.conversationId,
+              sensitiveCall.function.name,
+              sensitiveCall.function.arguments,
+              approvalContext
+            );
+            emit({
+              status: 'AWAITING_APPROVAL',
+              approvalId,
+              message: 'Aguardando aprovação no Telegram'
+            });
+            reply.raw.write('data: [DONE]\n\n');
+            return;
+          }
+        }
+
+        const durationSeconds = (Date.now() - requestStartTime) / 1000;
+        const usage = formatOpenAIUsage(lastStats, preparedPrompt, decision.type === 'message' ? decision.content : '', durationSeconds);
         if (decision.type === 'message') {
           if (decision.content) emit(openAIChunk(id, created, model, { content: decision.content }));
-          emit(openAIChunk(id, created, model, {}, 'stop'));
+          emit(openAIChunk(id, created, model, {}, 'stop', usage));
         } else {
           decision.toolCalls.forEach((toolCall, index) => emit(openAIChunk(id, created, model, {
             tool_calls: [{ index, ...toolCall }]
           })));
-          emit(openAIChunk(id, created, model, {}, 'tool_calls'));
+          emit(openAIChunk(id, created, model, {}, 'tool_calls', usage));
         }
+        emit(openAIUsageChunk(id, created, model, usage));
         reply.raw.write('data: [DONE]\n\n');
         return;
       }
+      let streamResponseText = '';
+      let lastStats: unknown;
       for await (const event of provider.streamMessage({
         conversationId: prepared.conversationId,
         prompt: preparedPrompt,
@@ -441,8 +620,17 @@ export async function buildApp(
         autoApprove: prepared.imageCount > 0,
         signal: controller.signal
       })) {
-        if (event.type === 'delta') emit(openAIChunk(id, created, model, { content: event.text }));
-        if (event.type === 'complete') emit(openAIChunk(id, created, model, {}, 'stop'));
+        if (event.type === 'delta') {
+          streamResponseText += event.text;
+          emit(openAIChunk(id, created, model, { content: event.text }));
+        }
+        if (event.type === 'complete') {
+          lastStats = event.stats;
+          const durationSeconds = (Date.now() - requestStartTime) / 1000;
+          const usage = formatOpenAIUsage(lastStats, preparedPrompt, event.text || streamResponseText, durationSeconds);
+          emit(openAIChunk(id, created, model, {}, 'stop', usage));
+          emit(openAIUsageChunk(id, created, model, usage));
+        }
       }
       reply.raw.write('data: [DONE]\n\n');
     } catch (error) {
@@ -459,6 +647,46 @@ export async function buildApp(
 
   app.post('/chat/completions', async (request, reply) => compatibleChat(request.body, request, reply));
   app.post('/v1/chat/completions', async (request, reply) => compatibleChat(request.body, request, reply));
+
+  // Rota de webhook para receber updates e callbacks inline do Telegram (estilo Muse)
+  app.post('/telegram/webhook', async (request, reply) => {
+    try {
+      const res = await handleTelegramWebhook(request.body);
+      return reply.code(200).send(res);
+    } catch (error) {
+      request.log.error({ err: error }, 'Erro ao processar webhook do Telegram');
+      return reply.code(200).send({ ok: false, error: (error as Error).message });
+    }
+  });
+
+  // Verificação de saúde e configuração do webhook do Telegram
+  app.get('/telegram/webhook', async () => ({
+    status: 'ok',
+    service: 'telegram-approval-webhook',
+    configured: Boolean(config.TELEGRAM_BOT_TOKEN && config.TELEGRAM_CHAT_ID)
+  }));
+
+  // Lista as aprovações registradas no SQLite
+  app.get('/api/approvals', async (request) => {
+    const query = request.query as { conversationId?: string; limit?: string };
+    const limit = query.limit ? Number(query.limit) : 50;
+    return { approvals: listApprovals(query.conversationId, limit) };
+  });
+
+  // Consulta os detalhes de uma aprovação específica pelo ID
+  app.get('/api/approvals/:id', async (request) => {
+    const params = request.params as { id: string };
+    const approval = getApproval(params.id);
+    if (!approval) throw new AppError(404, 'APPROVAL_NOT_FOUND', 'Aprovação não encontrada.');
+    return { approval };
+  });
+
+  // Dispara a retomada da execução de uma ação aprovada
+  app.post('/api/approvals/:id/resume', async (request) => {
+    const params = request.params as { id: string };
+    const result = await resumeApprovalExecution(params.id);
+    return { success: true, result };
+  });
 
   app.post('/api/conversations', async (request, reply) => {
     const body = createConversationSchema.parse(request.body);
@@ -507,9 +735,20 @@ export async function buildApp(
       turn.attachments.filter((item) => item.mime_type.startsWith('image/')).map((item) => item.stored_path),
       config.IMAGE_OCR_TIMEOUT_MS
     );
-    const text = await provider.sendMessage({ conversationId: input.conversationId, prompt, model, workingDirectory, signal });
+    const startExec = Date.now();
+    let text = '';
+    let stats: unknown;
+    if (provider.sendMessageDetailed) {
+      const detailed = await provider.sendMessageDetailed({ conversationId: input.conversationId, prompt, model, workingDirectory, signal });
+      text = detailed.text;
+      stats = detailed.usage;
+    } else {
+      text = await provider.sendMessage({ conversationId: input.conversationId, prompt, model, workingDirectory, signal });
+    }
     const assistant = db.addMessage(input.conversationId, 'assistant', text);
-    return { conversationId: input.conversationId, message: assistant, text };
+    const durationSeconds = (Date.now() - startExec) / 1000;
+    const usage = formatOpenAIUsage(stats, prompt, text, durationSeconds);
+    return { conversationId: input.conversationId, message: assistant, text, usage };
   }
 
   async function stream(body: unknown, request: FastifyRequest, reply: FastifyReply) {
