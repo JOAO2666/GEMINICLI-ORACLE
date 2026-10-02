@@ -62,7 +62,8 @@ const envSchema = z.object({
   TRUST_PROXY: bool,
   REQUIRE_HTTPS: bool,
   TELEGRAM_BOT_TOKEN: z.string().default(''),
-  TELEGRAM_CHAT_ID: z.string().default('')
+  TELEGRAM_CHAT_ID: z.string().default(''),
+  TELEGRAM_SESSION_TTL_HOURS: positiveInt(2)
 });
 
 export type Config = ReturnType<typeof loadConfig>;

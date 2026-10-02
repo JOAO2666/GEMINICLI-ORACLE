@@ -74,21 +74,90 @@ export function registerTelegramPromptHandler(handler: TelegramPromptHandler): v
   registeredTelegramPromptHandler = handler;
 }
 
-const chatConversations = new Map<number | string, string>();
+export type TelegramSessionCleanupHandler = (conversationId: string) => Promise<void>;
+let registeredSessionCleanupHandler: TelegramSessionCleanupHandler | null = null;
+
+export function registerTelegramSessionCleanup(handler: TelegramSessionCleanupHandler): void {
+  registeredSessionCleanupHandler = handler;
+}
+
+interface ChatSessionState {
+  conversationId: string;
+  lastActive: number;
+}
+
+const chatConversations = new Map<number | string, ChatSessionState>();
+
+export function getChatSession(chatId: number | string): { conversationId: string; isNewSession: boolean } {
+  const ttlHours = Number(process.env.TELEGRAM_SESSION_TTL_HOURS) || 2;
+  const ttlMs = ttlHours * 60 * 60 * 1000;
+  const now = Date.now();
+  const existing = chatConversations.get(chatId);
+
+  if (existing) {
+    if (now - existing.lastActive < ttlMs) {
+      existing.lastActive = now;
+      return { conversationId: existing.conversationId, isNewSession: false };
+    }
+    // Sessão expirou por inatividade: limpa arquivos da conversa antiga
+    const expiredId = existing.conversationId;
+    if (registeredSessionCleanupHandler) {
+      void registeredSessionCleanupHandler(expiredId).catch(() => undefined);
+    }
+  }
+
+  const newId = crypto.randomUUID();
+  chatConversations.set(chatId, { conversationId: newId, lastActive: now });
+  return { conversationId: newId, isNewSession: Boolean(existing) };
+}
 
 export function getChatConversationId(chatId: number | string): string {
-  let convId = chatConversations.get(chatId);
-  if (!convId) {
-    convId = crypto.randomUUID();
-    chatConversations.set(chatId, convId);
-  }
-  return convId;
+  return getChatSession(chatId).conversationId;
 }
 
 export function resetChatConversationId(chatId: number | string): string {
+  const existing = chatConversations.get(chatId);
+  if (existing && registeredSessionCleanupHandler) {
+    void registeredSessionCleanupHandler(existing.conversationId).catch(() => undefined);
+  }
   const newId = crypto.randomUUID();
-  chatConversations.set(chatId, newId);
+  chatConversations.set(chatId, { conversationId: newId, lastActive: Date.now() });
   return newId;
+}
+
+let janitorTimer: NodeJS.Timeout | null = null;
+
+export function startTelegramJanitor(intervalMinutes = 30): void {
+  if (janitorTimer) clearInterval(janitorTimer);
+  janitorTimer = setInterval(() => {
+    void cleanupExpiredTelegramSessions();
+  }, intervalMinutes * 60 * 1000);
+}
+
+export function stopTelegramJanitor(): void {
+  if (janitorTimer) {
+    clearInterval(janitorTimer);
+    janitorTimer = null;
+  }
+}
+
+export async function cleanupExpiredTelegramSessions(): Promise<number> {
+  const ttlHours = Number(process.env.TELEGRAM_SESSION_TTL_HOURS) || 2;
+  const ttlMs = ttlHours * 60 * 60 * 1000;
+  const now = Date.now();
+  let cleanedCount = 0;
+
+  for (const [chatId, session] of chatConversations.entries()) {
+    if (now - session.lastActive >= ttlMs) {
+      chatConversations.delete(chatId);
+      cleanedCount++;
+      if (registeredSessionCleanupHandler) {
+        await registeredSessionCleanupHandler(session.conversationId).catch(() => undefined);
+      }
+    }
+  }
+
+  return cleanedCount;
 }
 
 /**
@@ -328,10 +397,12 @@ export function initTelegramBot(customToken?: string): Telegraf<Context> | null 
     const db = getOrCreateDatabase();
     const pendingCount = (db.prepare("SELECT count(*) as c FROM approvals WHERE status = 'pending'").get() as { c: number })?.c ?? 0;
     const totalCount = (db.prepare('SELECT count(*) as c FROM approvals').get() as { c: number })?.c ?? 0;
+    const ttlHours = Number(process.env.TELEGRAM_SESSION_TTL_HOURS) || 2;
     await ctx.replyWithMarkdown(
-      `📊 *Status do Sistema de Aprovação*\n\n` +
+      `📊 *Status do Sistema de Aprovação e Chat*\n\n` +
       `• *Aprovações Pendentes:* ${pendingCount}\n` +
       `• *Total Registrado:* ${totalCount}\n` +
+      `• *Retenção Automática:* Expira e limpa arquivos após ${ttlHours}h de inatividade\n` +
       `• *Servidor:* Online (Oracle Cloud Always Free)`
     );
   });
@@ -422,16 +493,20 @@ export function initTelegramBot(customToken?: string): Telegraf<Context> | null 
   // Comandos de controle de conversa e ajuda
   bot.command(['reset', 'novo', 'limpar'], async (ctx) => {
     resetChatConversationId(ctx.chat.id);
-    await ctx.reply('🔄 Nova sessão iniciada! A próxima mensagem começará com o contexto limpo no Gemini CLI.');
+    await ctx.reply('🧹 *Sessão anterior encerrada e arquivos temporários limpos do servidor!* Espaço liberado na VM.', { parse_mode: 'Markdown' })
+      .catch(() => ctx.reply('🧹 Sessão anterior encerrada e arquivos temporários limpos do servidor! Espaço liberado na VM.'));
   });
 
   bot.command(['help', 'ajuda'], async (ctx) => {
+    const ttlHours = Number(process.env.TELEGRAM_SESSION_TTL_HOURS) || 2;
     await ctx.replyWithMarkdown(
       '🤖 *NumIA - Assistente Autônomo e Bot de Aprovação*\n\n' +
       '• *Conversar e Executar:* Envie qualquer mensagem ou pedido em texto (ex: "pesquise as notícias de hoje", "escreva um código em Python") e o agente Gemini CLI executará para você.\n' +
+      '• *Multimodal:* Envie fotos ou documentos de imagens (avulsas ou em álbuns de até 10 imagens) para análise visual e OCR.\n' +
       '• *Aprovações Muse:* Ferramentas sensíveis acionadas requerem confirmação com os botões inline.\n' +
-      '• `/status`: Consulta o status do servidor e fila de aprovações.\n' +
-      '• `/reset`: Limpa o contexto recente e inicia uma nova conversa.'
+      '• `/status`: Consulta o status do servidor, quota e retenção.\n' +
+      `• *Limpeza Automática:* Inatividade maior que ${ttlHours}h apaga arquivos e inicia nova conversa.\n` +
+      '• `/reset`: Limpa o contexto recente e os arquivos temporários imediatamente.'
     );
   });
 
@@ -467,7 +542,13 @@ export function initTelegramBot(customToken?: string): Telegraf<Context> | null 
 
     const chatId = ctx.chat?.id;
     if (!chatId) return;
-    const conversationId = getChatConversationId(chatId);
+    const session = getChatSession(chatId);
+    const conversationId = session.conversationId;
+
+    if (session.isNewSession) {
+      await ctx.reply('ℹ️ *Sessão anterior encerrada por inatividade. Arquivos anteriores apagados para poupar espaço no servidor.*', { parse_mode: 'Markdown' })
+        .catch(() => undefined);
+    }
 
     // Envia ação de digitação a cada 4s enquanto o modelo processa
     await ctx.sendChatAction('typing').catch(() => undefined);

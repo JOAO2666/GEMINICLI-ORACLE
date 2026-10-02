@@ -44,6 +44,9 @@ import {
   setDatabase,
   registerResumptionHandler,
   registerTelegramPromptHandler,
+  registerTelegramSessionCleanup,
+  startTelegramJanitor,
+  stopTelegramJanitor,
   initTelegramBot
 } from './telegram.js';
 
@@ -203,6 +206,18 @@ export async function buildApp(
     }
     return responseText;
   });
+
+  registerTelegramSessionCleanup(async (conversationId) => {
+    app.log.info({ conversationId }, 'Limpando arquivos da conversa do Telegram para poupar espaço');
+    provider.cancel?.(conversationId);
+    try {
+      db.deleteConversation(conversationId);
+    } catch {
+      // Ignora se já não existir
+    }
+    await files.deleteConversationFiles(conversationId).catch(() => undefined);
+  });
+  startTelegramJanitor(30);
 
   provider.onCatalogUpdate?.(() => {
     commandRegistry.invalidate();
@@ -886,6 +901,7 @@ export async function buildApp(
   }
 
   app.addHook('onClose', async () => {
+    stopTelegramJanitor();
     storageGuardian.stop();
     clearInterval(cleanup);
     clearInterval(modelRefresh);
