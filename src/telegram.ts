@@ -261,6 +261,20 @@ export function initTelegramBot(customToken?: string): Telegraf<Context> | null 
     // Modo offline ou sem conectividade com Telegram no momento
   });
 
+  // Middleware de autorização estrita: garante que apenas o proprietário autorizado possa interagir
+  bot.use(async (ctx, next) => {
+    const authorizedChatId = process.env.TELEGRAM_CHAT_ID;
+    if (authorizedChatId && ctx.from && String(ctx.from.id) !== String(authorizedChatId)) {
+      if (ctx.callbackQuery) {
+        await ctx.answerCbQuery('⛔ Não autorizado. Você não tem permissão para aprovar ou negar ações neste bot.', { show_alert: true }).catch(() => undefined);
+      } else {
+        await ctx.reply('⛔ Acesso restrito. Este bot é privado e exclusivo para aprovações do proprietário do NumIA.').catch(() => undefined);
+      }
+      return;
+    }
+    return next();
+  });
+
   // Comando /start: Apresentação do bot de aprovação
   bot.command('start', async (ctx) => {
     await ctx.replyWithMarkdown(
