@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -484,6 +485,67 @@ describe('Aprovação Estilo Muse via Telegram', () => {
     expect(chunks[1]?.length).toBeLessThanOrEqual(3900);
     expect(chunks[0]).toBe(paragraph1);
     expect(chunks[1]).toBe(paragraph2);
+  });
+
+  it('serve arquivos gerados para download via GET /telegram/files com assinatura HMAC', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tg-files-test-'));
+    dirs.push(dir);
+    const convId = crypto.randomUUID();
+    const convDir = path.join(dir, 'conversations', convId, 'files');
+    fs.mkdirSync(convDir, { recursive: true });
+
+    const fileName = 'resultado_calculo.svg';
+    const filePath = path.join(convDir, fileName);
+    fs.writeFileSync(filePath, '<svg><circle cx="50" cy="50" r="40" /></svg>', 'utf-8');
+
+    const config = loadConfig({
+      NUMIA_SERVER_TOKEN: 'a'.repeat(64),
+      DATA_DIR: dir,
+      DEFAULT_MODEL: 'gemini-3.7-flash-low',
+      ALLOWED_MODELS: 'gemini-3.7-flash-low'
+    });
+
+    const app = await buildApp(config, {
+      provider: {
+        async listModels() { return ['gemini-3.7-flash-low']; },
+        async checkAuthentication() { return { available: true, authenticated: true, version: '1.0' }; },
+        async sendMessage() { return 'ok'; }
+      }
+    });
+
+    try {
+      const expires = Date.now() + 60000;
+      const payload = `${convId}:${fileName}:${expires}`;
+      const sig = crypto.createHmac('sha256', config.artifactSigningKey).update(payload).digest('hex');
+
+      // 1. Download com assinatura válida
+      const res = await app.inject({
+        method: 'GET',
+        url: `/telegram/files/${convId}/${fileName}?expires=${expires}&sig=${sig}`
+      });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toContain('image/svg+xml');
+      expect(res.body).toContain('<circle cx="50" cy="50" r="40" />');
+
+      // 2. Download com assinatura inválida -> 403
+      const badRes = await app.inject({
+        method: 'GET',
+        url: `/telegram/files/${convId}/${fileName}?expires=${expires}&sig=assinatura_falsa`
+      });
+      expect(badRes.statusCode).toBe(403);
+
+      // 3. Download com link expirado -> 410
+      const expiredMs = Date.now() - 10000;
+      const expiredPayload = `${convId}:${fileName}:${expiredMs}`;
+      const expiredSig = crypto.createHmac('sha256', config.artifactSigningKey).update(expiredPayload).digest('hex');
+      const expiredRes = await app.inject({
+        method: 'GET',
+        url: `/telegram/files/${convId}/${fileName}?expires=${expiredMs}&sig=${expiredSig}`
+      });
+      expect(expiredRes.statusCode).toBe(410);
+    } finally {
+      await app.close();
+    }
   });
 });
 

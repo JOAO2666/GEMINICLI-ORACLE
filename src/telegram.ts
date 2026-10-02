@@ -7,6 +7,7 @@
  */
 
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { Telegraf, Markup, type Context } from 'telegraf';
@@ -60,6 +61,19 @@ export interface TelegramImageAttachment {
   mimeType: string;
 }
 
+// Estrutura para arquivos gerados que serão enviados diretamente ao usuário no Telegram
+export interface TelegramGeneratedFile {
+  filePath: string;
+  fileName: string;
+  mimeType?: string;
+  downloadUrl?: string;
+}
+
+export interface TelegramPromptResult {
+  text: string;
+  files?: TelegramGeneratedFile[];
+}
+
 // Tipo e handler registrado para responder mensagens e imagens diretamente com o Gemini CLI
 export type TelegramPromptHandler = (
   prompt: string,
@@ -67,7 +81,7 @@ export type TelegramPromptHandler = (
   chatId: number | string,
   images?: TelegramImageAttachment[],
   model?: string
-) => Promise<string>;
+) => Promise<string | TelegramPromptResult>;
 
 let registeredTelegramPromptHandler: TelegramPromptHandler | null = null;
 
@@ -870,14 +884,61 @@ export function initTelegramBot(customToken?: string): Telegraf<Context> | null 
       const response = await registeredTelegramPromptHandler(prompt, conversationId, chatId, images, session.model);
       clearInterval(typingTimer);
 
-      if (!response) {
+      const responseText = typeof response === 'string' ? response : (response?.text ?? '');
+      const generatedFiles = typeof response === 'object' && Array.isArray(response?.files) ? response.files : [];
+
+      if (!responseText && generatedFiles.length === 0) {
         await ctx.reply('(Sem conteúdo de resposta)').catch(() => undefined);
         return;
       }
 
-      const chunks = splitMessageChunks(response, 3900);
-      for (const chunk of chunks) {
-        await sendTelegramChunk(ctx, chunk);
+      if (responseText) {
+        const chunks = splitMessageChunks(responseText, 3900);
+        for (const chunk of chunks) {
+          await sendTelegramChunk(ctx, chunk);
+        }
+      }
+
+      if (generatedFiles.length > 0) {
+        for (const file of generatedFiles) {
+          try {
+            const stat = await fs.stat(file.filePath).catch(() => null);
+            if (!stat || !stat.isFile()) continue;
+
+            const ext = path.extname(file.fileName).toLowerCase();
+            const isPhoto = ['.png', '.jpg', '.jpeg', '.webp'].includes(ext);
+            const caption = file.downloadUrl
+              ? `📎 ${file.fileName}\n🔗 Baixar: ${file.downloadUrl}`
+              : `📎 ${file.fileName}`;
+
+            if (isPhoto && stat.size < 10 * 1024 * 1024) {
+              try {
+                await ctx.replyWithPhoto(
+                  { source: file.filePath },
+                  { caption: caption.slice(0, 1024) }
+                );
+                continue;
+              } catch (photoErr) {
+                console.warn('[Telegram] Falha ao enviar foto, tentando documento:', (photoErr as Error).message);
+              }
+            }
+
+            if (stat.size <= 50 * 1024 * 1024) {
+              await ctx.replyWithDocument(
+                { source: file.filePath, filename: file.fileName },
+                { caption: caption.slice(0, 1024) }
+              );
+            } else {
+              await ctx.reply(
+                `📦 *${file.fileName}* (${(stat.size / (1024 * 1024)).toFixed(1)} MB)\n` +
+                `Arquivo excede o limite de 50MB do Telegram para envio direto.\n` +
+                (file.downloadUrl ? `🔗 *Baixe pelo link:* ${file.downloadUrl}` : '')
+              );
+            }
+          } catch (fileErr) {
+            console.warn(`[Telegram] Falha ao enviar arquivo ${file.fileName}:`, (fileErr as Error).message);
+          }
+        }
       }
     } catch (error) {
       clearInterval(typingTimer);

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
@@ -180,12 +181,20 @@ export async function buildApp(
       finalPrompt += '\n\n' + savedImagePaths.map((p) => `[Imagem anexada: @${p}]`).join('\n');
     }
 
+    const beforeFiles = new Set<string>();
+    try {
+      const filesOnDisk = await fs.readdir(workingDirectory);
+      for (const f of filesOnDisk) beforeFiles.add(f);
+    } catch {
+      // ignore
+    }
+
     const systemInstructions = [
       'Você é o assistente inteligente oficial do usuário no aplicativo de mensagens Telegram.',
       'DIRETRIZES DE RESPOSTA, VELOCIDADE E FORMATAÇÃO:',
       '1. Responda DIRETAMENTE e de forma completa, ágil, clara e didática.',
-      '2. NÃO crie arquivos, diagramas .svg ou planos no disco a menos que o usuário peça explicitamente para salvar um arquivo. Resolva e explique tudo diretamente no texto da resposta.',
-      '3. NUNCA gere links locais como "file:///" ou caminhos de arquivos internos do servidor.',
+      '2. Se o usuário pedir para criar, gerar ou salvar arquivos, diagramas, códigos, scripts ou documentos, crie-os normalmente. O sistema enviará os arquivos gerados automaticamente como anexos no Telegram.',
+      '3. NUNCA cite caminhos locais internos do servidor (como "file:///..."). Apenas cite o nome do arquivo (ex: "consulte o diagrama questao1.svg"), pois o sistema enviará o arquivo diretamente no chat.',
       '4. FORMATAÇÃO E MATEMÁTICA: O Telegram NÃO suporta LaTeX/MathJax. NUNCA use tags com cifrões ($ ou $$) nem comandos como \\frac, \\text, \\approx, \\times.',
       '   Escreva todas as fórmulas, expressões matemáticas e unidades com símbolos Unicode legíveis (ex: x², √x, r > d/2, L₁₁ ≈ 2,82 cm, AB = 10 cm, P₁, P₂, 90°, α, β, π, ±, ×, ÷, ≤, ≥, ≠).',
       '   Para contas passo a passo ou equações longas, use passos numerados ou blocos de código com recuo.',
@@ -197,6 +206,8 @@ export async function buildApp(
     const promptWithInstructions = `${systemInstructions}\n\n=== MENSAGEM DO USUÁRIO ===\n${finalPrompt}`;
 
     let responseText = '';
+    let sessionId: string | undefined;
+
     if (provider.sendMessageDetailed) {
       const detailed = await provider.sendMessageDetailed({
         conversationId,
@@ -207,6 +218,7 @@ export async function buildApp(
         autoApprove: true
       });
       responseText = detailed.text;
+      sessionId = detailed.sessionId;
     } else {
       responseText = await provider.sendMessage({
         conversationId,
@@ -218,12 +230,128 @@ export async function buildApp(
       });
     }
 
+    // Identificação e coleta de arquivos gerados durante a interação
+    const discoveredFileNames = new Set<string>();
+
+    // 1. Arquivos novos criados no diretório de trabalho da conversa
+    try {
+      const afterFiles = await fs.readdir(workingDirectory);
+      for (const name of afterFiles) {
+        if (!beforeFiles.has(name) && !name.startsWith('telegram-img-') && !name.startsWith('.')) {
+          const fullPath = path.join(workingDirectory, name);
+          const stat = await fs.stat(fullPath).catch(() => null);
+          if (stat && stat.isFile()) {
+            discoveredFileNames.add(name);
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // 2. Artefatos criados no diretório brain do Antigravity CLI para esta sessão
+    const possibleBrainDirs: string[] = [];
+    if (sessionId) {
+      if (process.env.HOME) {
+        possibleBrainDirs.push(path.join(process.env.HOME, '.gemini', 'antigravity-cli', 'brain', sessionId));
+      }
+      possibleBrainDirs.push(path.join(os.homedir(), '.gemini', 'antigravity-cli', 'brain', sessionId));
+    }
+
+    for (const bDir of possibleBrainDirs) {
+      try {
+        const brainEntries = await fs.readdir(bDir, { withFileTypes: true });
+        for (const entry of brainEntries) {
+          if (entry.isFile() && !entry.name.endsWith('.metadata.json') && !entry.name.startsWith('.')) {
+            const brainFilePath = path.join(bDir, entry.name);
+            const destPath = path.join(workingDirectory, entry.name);
+            if (brainFilePath !== destPath) {
+              await fs.copyFile(brainFilePath, destPath).catch(() => undefined);
+            }
+            discoveredFileNames.add(entry.name);
+          }
+        }
+      } catch {
+        // pasta brain pode não existir
+      }
+    }
+
+    // 3. Arquivos referenciados como file:/// no texto da resposta do assistente
+    const fileUriRegex = /file:\/\/([^\s\)\"\'\]]+)/g;
+    let uriMatch: RegExpExecArray | null;
+    while ((uriMatch = fileUriRegex.exec(responseText)) !== null) {
+      try {
+        if (!uriMatch[1]) continue;
+        let matchedPath = uriMatch[1];
+        try { matchedPath = decodeURIComponent(matchedPath); } catch {}
+        if (/^\/[a-zA-Z]:\//.test(matchedPath)) {
+          matchedPath = matchedPath.slice(1);
+        }
+        const stat = await fs.stat(matchedPath).catch(() => null);
+        if (stat && stat.isFile()) {
+          const fileName = path.basename(matchedPath);
+          if (!fileName.endsWith('.metadata.json') && !fileName.startsWith('.')) {
+            const destPath = path.join(workingDirectory, fileName);
+            if (matchedPath !== destPath) {
+              await fs.copyFile(matchedPath, destPath).catch(() => undefined);
+            }
+            discoveredFileNames.add(fileName);
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // Construção das URLs de download assinadas e lista de arquivos para envio no Telegram
+    const baseUrl = (config.PUBLIC_BASE_URL || (config.DOMAIN ? `https://${config.DOMAIN}` : '')).trim().replace(/\/$/, '');
+    const ttlMs = 86400 * 3 * 1000; // 3 dias
+    const expiresAtMs = Date.now() + ttlMs;
+    const generatedFiles: Array<{ filePath: string; fileName: string; mimeType: string; downloadUrl?: string }> = [];
+
+    const escapeRegex = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    for (const fileName of discoveredFileNames) {
+      const fullPath = path.join(workingDirectory, fileName);
+      const payload = `${conversationId}:${fileName}:${expiresAtMs}`;
+      const sig = crypto.createHmac('sha256', config.artifactSigningKey).update(payload).digest('hex');
+      const downloadUrl = baseUrl
+        ? `${baseUrl}/telegram/files/${conversationId}/${encodeURIComponent(fileName)}?expires=${expiresAtMs}&sig=${sig}`
+        : undefined;
+
+      generatedFiles.push({
+        filePath: fullPath,
+        fileName,
+        mimeType: detectMimeType(fileName),
+        ...(downloadUrl ? { downloadUrl } : {})
+      });
+
+      // Substitui referências file:/// no texto por links de download válidos ou texto amigável
+      if (downloadUrl) {
+        const linkRegex = new RegExp(`\\[([^\\]]+)\\]\\(file:\\/\\/[^\\)]*${escapeRegex(fileName)}\\)`, 'gi');
+        responseText = responseText.replace(linkRegex, `[$1](${downloadUrl})`);
+
+        const rawUriRegex = new RegExp(`file:\\/\\/[^\\s\\)"'\\]]*${escapeRegex(fileName)}`, 'gi');
+        responseText = responseText.replace(rawUriRegex, downloadUrl);
+      } else {
+        const linkRegex = new RegExp(`\\[([^\\]]+)\\]\\(file:\\/\\/[^\\)]*${escapeRegex(fileName)}\\)`, 'gi');
+        responseText = responseText.replace(linkRegex, `*$1* (anexo 📎)`);
+
+        const rawUriRegex = new RegExp(`file:\\/\\/[^\\s\\)"'\\]]*${escapeRegex(fileName)}`, 'gi');
+        responseText = responseText.replace(rawUriRegex, `*${fileName}* (anexo 📎)`);
+      }
+    }
+
+    // Limpa quaisquer links file:/// restantes para caminhos internos que não viraram arquivos
+    responseText = responseText.replace(/\[([^\]]+)\]\(file:\/\/[^\)]+\)/g, '*$1*');
+    responseText = responseText.replace(/file:\/\/[^\s\)"'\]]+/g, '');
+
     try {
       db.addMessage(conversationId, 'assistant', responseText);
     } catch {
       // Ignora falha de persistência de mensagem
     }
-    return responseText;
+    return { text: responseText, files: generatedFiles };
   });
 
   registerTelegramSessionCleanup(async (conversationId) => {
@@ -411,6 +539,47 @@ export async function buildApp(
       return reply.type(mime).send(createReadStream(filePath));
     });
   }
+
+  app.get('/telegram/files/:conversationId/:fileName', async (request, reply) => {
+    const params = request.params as { conversationId: string; fileName: string };
+    const query = request.query as { expires?: string; sig?: string };
+
+    if (!/^[0-9a-f-]{36}$/i.test(params.conversationId)) {
+      return reply.code(400).send({ error: 'INVALID_ID', message: 'ID de conversa inválido.' });
+    }
+    const cleanName = path.basename(params.fileName);
+    if (!cleanName || cleanName !== params.fileName) {
+      return reply.code(400).send({ error: 'INVALID_FILE_NAME', message: 'Nome de arquivo inválido.' });
+    }
+
+    if (query.expires && query.sig) {
+      const expiresMs = parseInt(query.expires, 10);
+      if (isNaN(expiresMs) || Date.now() > expiresMs) {
+        return reply.code(410).send({ error: 'EXPIRED', message: 'Link de download expirado.' });
+      }
+      const payload = `${params.conversationId}:${cleanName}:${expiresMs}`;
+      const expectedSig = crypto.createHmac('sha256', config.artifactSigningKey).update(payload).digest('hex');
+      const actualBuf = Buffer.from(query.sig);
+      const expectedBuf = Buffer.from(expectedSig);
+      if (actualBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(actualBuf, expectedBuf)) {
+        return reply.code(403).send({ error: 'INVALID_SIGNATURE', message: 'Assinatura inválida.' });
+      }
+    }
+
+    const convDir = files.conversationDirectory(params.conversationId);
+    const targetPath = path.join(convDir, cleanName);
+
+    const stat = await fs.stat(targetPath).catch(() => null);
+    if (!stat || !stat.isFile()) {
+      return reply.code(404).send({ error: 'NOT_FOUND', message: 'Arquivo não encontrado ou já expirado.' });
+    }
+
+    const mime = detectMimeType(cleanName);
+    reply.header('Cache-Control', 'public, max-age=86400');
+    reply.header('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(cleanName)}`);
+    return reply.type(mime).send(createReadStream(targetPath));
+  });
+
   app.get('/api/provider/status', async () => provider.checkAuthentication());
   app.get('/api/gemini/status', async () => provider.checkAuthentication());
   app.get('/api/models', async () => ({

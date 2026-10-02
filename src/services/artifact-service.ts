@@ -25,7 +25,16 @@ const MIME_MAP: Record<string, string> = {
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
   '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp'
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.gif': 'image/gif',
+  '.py': 'text/x-python; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.ts': 'text/typescript; charset=utf-8',
+  '.zip': 'application/zip',
+  '.xml': 'application/xml; charset=utf-8',
+  '.tar': 'application/x-tar',
+  '.gz': 'application/gzip'
 };
 
 export function detectMimeType(filename: string): string {
