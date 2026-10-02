@@ -193,6 +193,16 @@ export class AppDatabase {
     return row;
   }
 
+  ensureConversation(id: string, model: string): ConversationRow {
+    const existing = this.db.prepare('SELECT * FROM conversations WHERE id = ?').get(id) as ConversationRow | undefined;
+    if (existing) return existing;
+    const now = new Date().toISOString();
+    const row: ConversationRow = { id, created_at: now, updated_at: now, model, gemini_session_id: null };
+    this.db.prepare(`INSERT INTO conversations (id,created_at,updated_at,model,gemini_session_id)
+      VALUES (@id,@created_at,@updated_at,@model,@gemini_session_id)`).run(row);
+    return row;
+  }
+
   listConversations(): ConversationRow[] {
     return this.db.prepare('SELECT * FROM conversations ORDER BY updated_at DESC').all() as ConversationRow[];
   }

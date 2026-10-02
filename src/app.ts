@@ -43,6 +43,7 @@ import {
   handleTelegramWebhook,
   setDatabase,
   registerResumptionHandler,
+  registerTelegramPromptHandler,
   initTelegramBot
 } from './telegram.js';
 
@@ -144,6 +145,62 @@ export async function buildApp(
       // Conversa efêmera ou gerada fora do banco
     }
 
+    return responseText;
+  });
+
+  registerTelegramPromptHandler(async (prompt, conversationId, _chatId, images = []) => {
+    app.log.info({ conversationId, imageCount: images.length }, 'Processando mensagem do Telegram com o Antigravity CLI');
+    db.ensureConversation(conversationId, config.DEFAULT_MODEL);
+    db.addMessage(conversationId, 'user', prompt);
+
+    const workingDirectory = files.conversationDirectory(conversationId);
+    await fs.mkdir(workingDirectory, { recursive: true, mode: 0o700 });
+
+    const savedImagePaths: string[] = [];
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i];
+      if (!img) continue;
+      const targetPath = path.join(workingDirectory, `telegram-img-${Date.now()}-${i}-${img.fileName}`);
+      await fs.writeFile(targetPath, img.buffer);
+      savedImagePaths.push(targetPath);
+    }
+
+    let finalPrompt = prompt;
+    if (savedImagePaths.length > 0) {
+      finalPrompt = await addLocalImageOcr(
+        prompt,
+        config.DEFAULT_MODEL,
+        savedImagePaths,
+        config.IMAGE_OCR_TIMEOUT_MS
+      );
+      finalPrompt += '\n\n' + savedImagePaths.map((p) => `[Imagem anexada: @${p}]`).join('\n');
+    }
+
+    let responseText = '';
+    if (provider.sendMessageDetailed) {
+      const detailed = await provider.sendMessageDetailed({
+        conversationId,
+        prompt: finalPrompt,
+        model: config.DEFAULT_MODEL,
+        workingDirectory,
+        autoApprove: true
+      });
+      responseText = detailed.text;
+    } else {
+      responseText = await provider.sendMessage({
+        conversationId,
+        prompt: finalPrompt,
+        model: config.DEFAULT_MODEL,
+        workingDirectory,
+        autoApprove: true
+      });
+    }
+
+    try {
+      db.addMessage(conversationId, 'assistant', responseText);
+    } catch {
+      // Ignora falha de persistência de mensagem
+    }
     return responseText;
   });
 

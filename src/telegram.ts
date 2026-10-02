@@ -53,6 +53,44 @@ let telegramBot: Telegraf<Context> | null = null;
 // Handler registrado para retomar a execução do Antigravity CLI
 let registeredResumptionHandler: ResumptionHandler | null = null;
 
+// Estrutura para anexos de imagem recebidos pelo Telegram
+export interface TelegramImageAttachment {
+  buffer: Buffer;
+  fileName: string;
+  mimeType: string;
+}
+
+// Tipo e handler registrado para responder mensagens e imagens diretamente com o Gemini CLI
+export type TelegramPromptHandler = (
+  prompt: string,
+  conversationId: string,
+  chatId: number | string,
+  images?: TelegramImageAttachment[]
+) => Promise<string>;
+
+let registeredTelegramPromptHandler: TelegramPromptHandler | null = null;
+
+export function registerTelegramPromptHandler(handler: TelegramPromptHandler): void {
+  registeredTelegramPromptHandler = handler;
+}
+
+const chatConversations = new Map<number | string, string>();
+
+export function getChatConversationId(chatId: number | string): string {
+  let convId = chatConversations.get(chatId);
+  if (!convId) {
+    convId = crypto.randomUUID();
+    chatConversations.set(chatId, convId);
+  }
+  return convId;
+}
+
+export function resetChatConversationId(chatId: number | string): string {
+  const newId = crypto.randomUUID();
+  chatConversations.set(chatId, newId);
+  return newId;
+}
+
 /**
  * Garante que a tabela 'approvals' exista no banco SQLite com o esquema requerido:
  * (id TEXT PRIMARY KEY, conversationId TEXT, action TEXT, details TEXT, status TEXT DEFAULT 'pending', created_at DATETIME)
@@ -379,6 +417,171 @@ export function initTelegramBot(customToken?: string): Telegraf<Context> | null 
       ].join('\n'),
       { parse_mode: 'Markdown' }
     ).catch(() => undefined);
+  });
+
+  // Comandos de controle de conversa e ajuda
+  bot.command(['reset', 'novo', 'limpar'], async (ctx) => {
+    resetChatConversationId(ctx.chat.id);
+    await ctx.reply('🔄 Nova sessão iniciada! A próxima mensagem começará com o contexto limpo no Gemini CLI.');
+  });
+
+  bot.command(['help', 'ajuda'], async (ctx) => {
+    await ctx.replyWithMarkdown(
+      '🤖 *NumIA - Assistente Autônomo e Bot de Aprovação*\n\n' +
+      '• *Conversar e Executar:* Envie qualquer mensagem ou pedido em texto (ex: "pesquise as notícias de hoje", "escreva um código em Python") e o agente Gemini CLI executará para você.\n' +
+      '• *Aprovações Muse:* Ferramentas sensíveis acionadas requerem confirmação com os botões inline.\n' +
+      '• `/status`: Consulta o status do servidor e fila de aprovações.\n' +
+      '• `/reset`: Limpa o contexto recente e inicia uma nova conversa.'
+    );
+  });
+
+  async function downloadTelegramFile(
+    botInstance: Telegraf<Context>,
+    fileId: string,
+    mimeType = 'image/jpeg'
+  ): Promise<TelegramImageAttachment | null> {
+    try {
+      const fileLink = await botInstance.telegram.getFileLink(fileId);
+      const res = await fetch(fileLink.href);
+      if (!res.ok) throw new Error(`Falha no download da imagem: HTTP ${res.status}`);
+      const arrayBuffer = await res.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      const ext = mimeType.includes('png') ? '.png' : mimeType.includes('webp') ? '.webp' : '.jpg';
+      const fileName = `telegram-${crypto.randomUUID().slice(0, 8)}${ext}`;
+      return { buffer, fileName, mimeType };
+    } catch (err) {
+      console.warn('[Telegram] Falha ao baixar arquivo de imagem do Telegram:', (err as Error).message);
+      return null;
+    }
+  }
+
+  async function handleUserChatTurn(
+    ctx: Context,
+    prompt: string,
+    images: TelegramImageAttachment[] = []
+  ): Promise<void> {
+    if (!registeredTelegramPromptHandler) {
+      await ctx.reply('⚠️ O assistente Gemini CLI não está conectado para execução de mensagens no momento.').catch(() => undefined);
+      return;
+    }
+
+    const chatId = ctx.chat?.id;
+    if (!chatId) return;
+    const conversationId = getChatConversationId(chatId);
+
+    // Envia ação de digitação a cada 4s enquanto o modelo processa
+    await ctx.sendChatAction('typing').catch(() => undefined);
+    const typingTimer = setInterval(() => {
+      ctx.sendChatAction('typing').catch(() => undefined);
+    }, 4000);
+
+    try {
+      const response = await registeredTelegramPromptHandler(prompt, conversationId, chatId, images);
+      clearInterval(typingTimer);
+
+      if (!response) {
+        await ctx.reply('(Sem conteúdo de resposta)').catch(() => undefined);
+        return;
+      }
+
+      // Se a resposta for longa (> 4000 caracteres), divide em múltiplos envios (limite do Telegram: 4096)
+      const maxChunk = 4000;
+      for (let i = 0; i < response.length; i += maxChunk) {
+        const chunk = response.slice(i, i + maxChunk);
+        try {
+          await ctx.replyWithMarkdown(chunk);
+        } catch {
+          await ctx.reply(chunk);
+        }
+      }
+    } catch (error) {
+      clearInterval(typingTimer);
+      const errMsg = (error as Error).message || 'Erro ao processar mensagem.';
+      await ctx.reply(`❌ Ocorreu um erro ao processar sua solicitação com o Gemini CLI:\n${errMsg}`).catch(() => undefined);
+    }
+  }
+
+  // Buffer para agrupar álbuns de fotos (Media Groups com até 10 imagens)
+  interface MediaGroupBatch {
+    ctx: Context;
+    items: Array<{ fileId: string; caption?: string; mimeType?: string }>;
+    timer: NodeJS.Timeout;
+  }
+  const mediaGroups = new Map<string, MediaGroupBatch>();
+
+  // Processamento de mensagens de texto regulares enviadas pelo usuário
+  bot.on('text', async (ctx) => {
+    const text = ctx.message.text?.trim();
+    if (!text || text.startsWith('/')) {
+      return;
+    }
+    await handleUserChatTurn(ctx, text, []);
+  });
+
+  // Processamento de fotos (individuais ou álbuns de até 10 imagens)
+  bot.on('photo', async (ctx) => {
+    const photoArray = ctx.message.photo;
+    if (!photoArray || !photoArray.length) return;
+    const largestPhoto = photoArray[photoArray.length - 1];
+    if (!largestPhoto) return;
+    const caption = ctx.message.caption?.trim() || '';
+    const mediaGroupId = ctx.message.media_group_id;
+
+    if (mediaGroupId) {
+      let batch = mediaGroups.get(mediaGroupId);
+      if (!batch) {
+        batch = {
+          ctx,
+          items: [],
+          timer: setTimeout(async () => {
+            mediaGroups.delete(mediaGroupId);
+            const collected = batch!.items;
+            const finalCaption = collected.find((item) => item.caption)?.caption || 'Analise as imagens enviadas.';
+            const downloadedImages: TelegramImageAttachment[] = [];
+            for (const item of collected) {
+              const img = await downloadTelegramFile(bot, item.fileId, item.mimeType || 'image/jpeg');
+              if (img) downloadedImages.push(img);
+            }
+            await handleUserChatTurn(batch!.ctx, finalCaption, downloadedImages);
+          }, 1200)
+        };
+        mediaGroups.set(mediaGroupId, batch);
+      } else {
+        clearTimeout(batch.timer);
+        batch.timer = setTimeout(async () => {
+          mediaGroups.delete(mediaGroupId);
+          const collected = batch!.items;
+          const finalCaption = collected.find((item) => item.caption)?.caption || 'Analise as imagens enviadas.';
+          const downloadedImages: TelegramImageAttachment[] = [];
+          for (const item of collected) {
+            const img = await downloadTelegramFile(bot, item.fileId, item.mimeType || 'image/jpeg');
+            if (img) downloadedImages.push(img);
+          }
+          await handleUserChatTurn(batch!.ctx, finalCaption, downloadedImages);
+        }, 1200);
+      }
+
+      batch.items.push({ fileId: largestPhoto.file_id, caption, mimeType: 'image/jpeg' });
+    } else {
+      const downloaded = await downloadTelegramFile(bot, largestPhoto.file_id, 'image/jpeg');
+      const images = downloaded ? [downloaded] : [];
+      await handleUserChatTurn(ctx, caption || 'Analise a imagem enviada.', images);
+    }
+  });
+
+  // Processamento de documentos de imagem
+  bot.on('document', async (ctx) => {
+    const doc = ctx.message.document;
+    if (!doc) return;
+    const mime = doc.mime_type || '';
+    if (!mime.startsWith('image/')) {
+      await ctx.reply('📄 Recebi seu documento. Para envio de arquivos no Telegram, utilize imagens (PNG, JPEG, WEBP, etc.).');
+      return;
+    }
+    const caption = ctx.message.caption?.trim() || '';
+    const downloaded = await downloadTelegramFile(bot, doc.file_id, mime);
+    const images = downloaded ? [downloaded] : [];
+    await handleUserChatTurn(ctx, caption || 'Analise a imagem enviada.', images);
   });
 
   telegramBot = bot;

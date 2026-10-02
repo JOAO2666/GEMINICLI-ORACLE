@@ -15,6 +15,7 @@ import {
   handleTelegramWebhook,
   setDatabase,
   registerResumptionHandler,
+  registerTelegramPromptHandler,
   ensureApprovalsTable
 } from '../src/telegram.js';
 import type { AIProvider, ProviderEvent, ProviderRequest } from '../src/types.js';
@@ -427,4 +428,27 @@ describe('Aprovação Estilo Muse via Telegram', () => {
       await app.close();
     }
   });
+
+  it('responde mensagens de texto diretamente com o Gemini CLI via Telegram', async () => {
+    let capturedPrompt = '';
+    registerTelegramPromptHandler(async (prompt) => {
+      capturedPrompt = prompt;
+      return `Resposta do Gemini para: ${prompt}`;
+    });
+
+    const webhookRes = await handleTelegramWebhook({
+      update_id: 10004,
+      message: {
+        message_id: 99,
+        from: { id: 987654321, is_bot: false, first_name: 'João' },
+        chat: { id: 987654321, type: 'private' },
+        date: 1600000000,
+        text: 'Olá Gemini, faça um resumo das notícias de tecnologia.'
+      }
+    });
+
+    expect(webhookRes.ok).toBe(true);
+    expect(capturedPrompt).toBe('Olá Gemini, faça um resumo das notícias de tecnologia.');
+  });
 });
+
