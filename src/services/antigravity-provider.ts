@@ -246,6 +246,7 @@ export function buildAntigravityArgs(request: ProviderRequest, timeoutMs: number
   }
   if (request.autoApprove) args.push('--dangerously-skip-permissions');
   if (request.jsonSchema) args.push('--json-schema', JSON.stringify(request.jsonSchema));
+  if (request.disableSlashCommands) args.push('--disable-slash-commands');
   return args;
 }
 

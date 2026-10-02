@@ -65,7 +65,8 @@ export type TelegramPromptHandler = (
   prompt: string,
   conversationId: string,
   chatId: number | string,
-  images?: TelegramImageAttachment[]
+  images?: TelegramImageAttachment[],
+  model?: string
 ) => Promise<string>;
 
 let registeredTelegramPromptHandler: TelegramPromptHandler | null = null;
@@ -84,11 +85,12 @@ export function registerTelegramSessionCleanup(handler: TelegramSessionCleanupHa
 interface ChatSessionState {
   conversationId: string;
   lastActive: number;
+  model?: string;
 }
 
 const chatConversations = new Map<number | string, ChatSessionState>();
 
-export function getChatSession(chatId: number | string): { conversationId: string; isNewSession: boolean } {
+export function getChatSession(chatId: number | string): { conversationId: string; isNewSession: boolean; model?: string } {
   const ttlHours = Number(process.env.TELEGRAM_SESSION_TTL_HOURS) || 2;
   const ttlMs = ttlHours * 60 * 60 * 1000;
   const now = Date.now();
@@ -97,7 +99,7 @@ export function getChatSession(chatId: number | string): { conversationId: strin
   if (existing) {
     if (now - existing.lastActive < ttlMs) {
       existing.lastActive = now;
-      return { conversationId: existing.conversationId, isNewSession: false };
+      return { conversationId: existing.conversationId, isNewSession: false, model: existing.model };
     }
     // Sessão expirou por inatividade: limpa arquivos da conversa antiga
     const expiredId = existing.conversationId;
@@ -107,8 +109,17 @@ export function getChatSession(chatId: number | string): { conversationId: strin
   }
 
   const newId = crypto.randomUUID();
-  chatConversations.set(chatId, { conversationId: newId, lastActive: now });
-  return { conversationId: newId, isNewSession: Boolean(existing) };
+  chatConversations.set(chatId, { conversationId: newId, lastActive: now, model: existing?.model });
+  return { conversationId: newId, isNewSession: Boolean(existing), model: existing?.model };
+}
+
+export function setChatModel(chatId: number | string, model: string): void {
+  const session = chatConversations.get(chatId);
+  if (session) {
+    session.model = model;
+  } else {
+    chatConversations.set(chatId, { conversationId: crypto.randomUUID(), lastActive: Date.now(), model });
+  }
 }
 
 export function getChatConversationId(chatId: number | string): string {
@@ -121,7 +132,7 @@ export function resetChatConversationId(chatId: number | string): string {
     void registeredSessionCleanupHandler(existing.conversationId).catch(() => undefined);
   }
   const newId = crypto.randomUUID();
-  chatConversations.set(chatId, { conversationId: newId, lastActive: Date.now() });
+  chatConversations.set(chatId, { conversationId: newId, lastActive: Date.now(), model: existing?.model });
   return newId;
 }
 
@@ -336,6 +347,224 @@ export function setTelegramBot(bot: Telegraf<Context> | null): void {
 }
 
 /**
+ * Converte notações matemáticas LaTeX/MathJax em caracteres Unicode limpos e legíveis no Telegram,
+ * removendo cifrões, comandos LaTeX e links internos do sistema.
+ */
+export function formatMathForTelegram(text: string): string {
+  if (!text) return '';
+
+  // 1. Protege blocos de código (``` e `) para não alterar código-fonte
+  const codeBlocks: string[] = [];
+  let res = text.replace(/(```[\s\S]*?```|`[^`\n]+`)/g, (match) => {
+    codeBlocks.push(match);
+    return `__CODE_BLOCK_${codeBlocks.length - 1}__`;
+  });
+
+  // 2. Remove links para arquivos locais do sistema (file:///)
+  res = res.replace(/\[([^\]]+)\]\(file:\/\/\/[^\)]+\)/g, '📄 *$1*');
+  res = res.replace(/file:\/\/\/[^\s\)\>]+/g, '');
+
+  // 3. Frações numéricas e gerais
+  res = res.replace(/\\frac\{1\}\{2\}/g, '½');
+  res = res.replace(/\\frac\{1\}\{4\}/g, '¼');
+  res = res.replace(/\\frac\{3\}\{4\}/g, '¾');
+  res = res.replace(/\\frac\{1\}\{3\}/g, '⅓');
+  res = res.replace(/\\frac\{2\}\{3\}/g, '⅔');
+  res = res.replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, (_m, num: string, den: string) => {
+    const cleanNum = num.trim();
+    const cleanDen = den.trim();
+    if (/^[a-zA-Z0-9]$/.test(cleanNum) && /^[a-zA-Z0-9]$/.test(cleanDen)) {
+      return `${cleanNum}/${cleanDen}`;
+    }
+    return `(${cleanNum})/(${cleanDen})`;
+  });
+
+  // 4. Raízes
+  res = res.replace(/\\sqrt\[([^{}]+)\]\{([^{}]+)\}/g, '⁽$1⁾√($2)');
+  res = res.replace(/\\sqrt\{([^{}]+)\}/g, '√($1)');
+
+  // 5. Comandos de formatação de texto LaTeX
+  res = res.replace(/\\textbf\{([^{}]+)\}/g, '*$1*');
+  res = res.replace(/\\textit\{([^{}]+)\}/g, '_$1_');
+  res = res.replace(/\\text\{([^{}]+)\}/g, '$1');
+  res = res.replace(/\\mathrm\{([^{}]+)\}/g, '$1');
+  res = res.replace(/\\mathbf\{([^{}]+)\}/g, '*$1*');
+  res = res.replace(/\\mathit\{([^{}]+)\}/g, '_$1_');
+
+  // 6. Símbolos e Operadores
+  const mathSymbols: Record<string, string> = {
+    '\\approx': '≈',
+    '\\sim': '~',
+    '\\times': '×',
+    '\\cdot': '·',
+    '\\div': '÷',
+    '\\pm': '±',
+    '\\mp': '∓',
+    '\\leq': '≤',
+    '\\le': '≤',
+    '\\geq': '≥',
+    '\\ge': '≥',
+    '\\neq': '≠',
+    '\\ne': '≠',
+    '\\infty': '∞',
+    '\\degree': '°',
+    '^{\\circ}': '°',
+    '^\\circ': '°',
+    '\\rightarrow': '→',
+    '\\to': '→',
+    '\\leftarrow': '←',
+    '\\Rightarrow': '⇒',
+    '\\Leftrightarrow': '⇔',
+    '\\parallel': '∥',
+    '\\perp': '⊥',
+    '\\angle': '∠',
+    '\\in': '∈',
+    '\\subset': '⊂',
+    '\\forall': '∀',
+    '\\exists': '∃'
+  };
+  for (const [tex, uni] of Object.entries(mathSymbols)) {
+    res = res.split(tex).join(uni);
+  }
+
+  // 7. Letras Gregas
+  const greekLetters: Record<string, string> = {
+    '\\alpha': 'α',
+    '\\beta': 'β',
+    '\\gamma': 'γ',
+    '\\delta': 'δ',
+    '\\epsilon': 'ε',
+    '\\theta': 'θ',
+    '\\lambda': 'λ',
+    '\\mu': 'μ',
+    '\\pi': 'π',
+    '\\rho': 'ρ',
+    '\\sigma': 'σ',
+    '\\tau': 'τ',
+    '\\phi': 'φ',
+    '\\omega': 'ω',
+    '\\Delta': 'Δ',
+    '\\Gamma': 'Γ',
+    '\\Lambda': 'Λ',
+    '\\Sigma': 'Σ',
+    '\\Omega': 'Ω'
+  };
+  for (const [tex, uni] of Object.entries(greekLetters)) {
+    res = res.split(tex).join(uni);
+  }
+
+  // 8. Delimitadores e espaços LaTeX
+  res = res.replace(/\\left\(/g, '(');
+  res = res.replace(/\\right\)/g, ')');
+  res = res.replace(/\\left\[/g, '[');
+  res = res.replace(/\\right\]/g, ']');
+  res = res.replace(/\\left\\\{/g, '{');
+  res = res.replace(/\\right\\\}/g, '}');
+  res = res.replace(/\\\{/g, '{');
+  res = res.replace(/\\\}/g, '}');
+  res = res.replace(/\\quad/g, '  ');
+  res = res.replace(/\\qquad/g, '    ');
+  res = res.replace(/\\[,;:!]/g, ' ');
+
+  // 9. Sobrescritos e Subscritos
+  const superMap: Record<string, string> = {
+    '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴',
+    '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹',
+    '+': '⁺', '-': '⁻', '=': '⁼', '(': '⁽', ')': '⁾',
+    'n': 'ⁿ', 'i': 'ⁱ', 'x': 'ˣ'
+  };
+  const subMap: Record<string, string> = {
+    '0': '₀', '1': '₁', '2': '₂', '3': '₃', '4': '₄',
+    '5': '₅', '6': '₆', '7': '₇', '8': '₈', '9': '₉',
+    '+': '₊', '-': '₋', '=': '₌', '(': '₍', ')': '₎',
+    'a': 'ₐ', 'e': 'ₑ', 'i': 'ᵢ', 'o': 'ₒ', 'r': 'ᵣ', 'u': 'ᵤ', 'v': 'ᵥ', 'x': 'ₓ'
+  };
+
+  res = res.replace(/\^\{([^{}]+)\}/g, (_m, content: string) => {
+    const chars = content.split('');
+    if (chars.every(c => superMap[c])) {
+      return chars.map(c => superMap[c]).join('');
+    }
+    return `^(${content})`;
+  });
+  res = res.replace(/\^([0-9nix+-])/g, (_m, c: string) => superMap[c] || `^${c}`);
+
+  res = res.replace(/_\{([^{}]+)\}/g, (_m, content: string) => {
+    const chars = content.split('');
+    if (chars.every(c => subMap[c])) {
+      return chars.map(c => subMap[c]).join('');
+    }
+    return `_(${content})`;
+  });
+  res = res.replace(/_([0-9+-])/g, (_m, c: string) => subMap[c] || `_${c}`);
+
+  // 10. Blocos de equações $$ ... $$ e \[ ... \]
+  res = res.replace(/\$\$([\s\S]*?)\$\$/g, (_m, inner: string) => `\n${inner.trim()}\n`);
+  res = res.replace(/\\\[([\s\S]*?)\\\]/g, (_m, inner: string) => `\n${inner.trim()}\n`);
+  res = res.replace(/\\\(([\s\S]*?)\\\)/g, (_m, inner: string) => inner.trim());
+
+  // 11. Remove $ em expressões matemáticas inline simples ($AB$ -> AB, $r > d/2$ -> r > d/2)
+  res = res.replace(/\$([^\$\n]+)\$/g, (_m, inner: string) => inner.trim());
+
+  // 12. Corrige vírgula decimal em fórmulas (ex: 2{,}82 -> 2,82)
+  res = res.replace(/([0-9])\{,\}([0-9])/g, '$1,$2');
+
+  // 13. Restaura blocos de código originais
+  res = res.replace(/__CODE_BLOCK_(\d+)__/g, (_m, idxStr: string) => {
+    const idx = Number(idxStr);
+    return codeBlocks[idx] ?? '';
+  });
+
+  return res.trim();
+}
+
+/**
+ * Divide respostas longas em blocos que respeitam o limite de 4096 caracteres do Telegram,
+ * quebrando preferencialmente em parágrafos ou quebras de linha.
+ */
+export function splitMessageChunks(text: string, maxLength = 3900): string[] {
+  if (text.length <= maxLength) return [text];
+  const chunks: string[] = [];
+  let remaining = text;
+
+  while (remaining.length > 0) {
+    if (remaining.length <= maxLength) {
+      chunks.push(remaining);
+      break;
+    }
+    let splitIndex = remaining.lastIndexOf('\n\n', maxLength);
+    if (splitIndex < maxLength / 2) {
+      splitIndex = remaining.lastIndexOf('\n', maxLength);
+    }
+    if (splitIndex < maxLength / 2) {
+      splitIndex = remaining.lastIndexOf(' ', maxLength);
+    }
+    if (splitIndex <= 0) {
+      splitIndex = maxLength;
+    }
+    chunks.push(remaining.slice(0, splitIndex).trim());
+    remaining = remaining.slice(splitIndex).trim();
+  }
+  return chunks;
+}
+
+/**
+ * Envia um trecho formatado para o Telegram com fallback gracioso para texto simples caso haja erro de Markdown
+ */
+export async function sendTelegramChunk(ctx: Context, chunk: string): Promise<void> {
+  const formatted = formatMathForTelegram(chunk);
+  try {
+    await ctx.replyWithMarkdown(formatted);
+  } catch {
+    try {
+      await ctx.reply(formatted);
+    } catch {
+      await ctx.reply(chunk);
+    }
+  }
+}
+
+/**
  * Inicializa a instância do bot Telegraf e registra os handlers de callback e comandos
  */
 export function initTelegramBot(customToken?: string): Telegraf<Context> | null {
@@ -348,7 +577,9 @@ export function initTelegramBot(customToken?: string): Telegraf<Context> | null 
     return telegramBot;
   }
 
-  const bot = new Telegraf(token);
+  const bot = new Telegraf(token, {
+    handlerTimeout: 900_000
+  });
 
   // Define botInfo inicial para evitar chamada de rede getMe síncrona durante webhook ou testes
   bot.botInfo = {
@@ -497,16 +728,86 @@ export function initTelegramBot(customToken?: string): Telegraf<Context> | null 
       .catch(() => ctx.reply('🧹 Sessão anterior encerrada e arquivos temporários limpos do servidor! Espaço liberado na VM.'));
   });
 
+  bot.command(['model', 'modelo'], async (ctx) => {
+    const text = ctx.message.text?.trim() || '';
+    const parts = text.split(/\s+/);
+    const chosen = parts[1]?.toLowerCase();
+    const chatId = ctx.chat.id;
+    const session = getChatSession(chatId);
+
+    const availableModels: Record<string, { id: string; label: string; desc: string }> = {
+      turbo: {
+        id: 'gemini-3.8-flash-low',
+        label: '⚡ Flash Turbo (Low)',
+        desc: 'Respostas ultra-rápidas em poucos segundos, ideal para conversas dinâmicas.'
+      },
+      low: {
+        id: 'gemini-3.8-flash-low',
+        label: '⚡ Flash Turbo (Low)',
+        desc: 'Respostas ultra-rápidas em poucos segundos, ideal para conversas dinâmicas.'
+      },
+      flash: {
+        id: 'gemini-3.8-flash-medium',
+        label: '🚀 Flash Padrão (Medium)',
+        desc: 'Equilíbrio ideal entre velocidade e raciocínio para resolver atividades.'
+      },
+      medium: {
+        id: 'gemini-3.8-flash-medium',
+        label: '🚀 Flash Padrão (Medium)',
+        desc: 'Equilíbrio ideal entre velocidade e raciocínio para resolver atividades.'
+      },
+      pensar: {
+        id: 'gemini-3.8-flash-high',
+        label: '🧠 Flash Raciocínio (High)',
+        desc: 'Pensamento analítico detalhado e aprofundado para problemas complexos.'
+      },
+      high: {
+        id: 'gemini-3.8-flash-high',
+        label: '🧠 Flash Raciocínio (High)',
+        desc: 'Pensamento analítico detalhado e aprofundado para problemas complexos.'
+      },
+      pro: {
+        id: 'gemini-3.1-pro-high',
+        label: '💎 Gemini 3.1 Pro (High)',
+        desc: 'Modelo mais avançado do Google para tarefas de máxima complexidade técnica.'
+      }
+    };
+
+    if (!chosen || !availableModels[chosen]) {
+      const currentModelId = session.model || process.env.TELEGRAM_MODEL || 'gemini-3.8-flash-medium';
+      await ctx.replyWithMarkdown(
+        `🤖 *Configuração de Velocidade e Modelo do Gemini*\n\n` +
+        `• *Modelo Atual:* \`${currentModelId}\`\n\n` +
+        `*Opções para troca rápida:*\n` +
+        `• \`/model turbo\` — *Flash Turbo (Low)*: Ultra veloz, resposta imediata.\n` +
+        `• \`/model flash\` — *Flash Padrão (Medium)*: Rápido e inteligente (Recomendado).\n` +
+        `• \`/model pensar\` — *Flash Raciocínio (High)*: Pensamento estendido em profundidade.\n` +
+        `• \`/model pro\` — *Gemini 3.1 Pro*: Alta precisão para tarefas complexas.\n\n` +
+        `_Dica: Se quiser o máximo de velocidade, use \`/model flash\` ou \`/model turbo\`._`
+      );
+      return;
+    }
+
+    const selected = availableModels[chosen];
+    setChatModel(chatId, selected.id);
+    await ctx.replyWithMarkdown(
+      `✅ *Modelo alterado com sucesso!*\n\n` +
+      `• *Novo Modelo:* ${selected.label} (\`${selected.id}\`)\n` +
+      `• *Descrição:* ${selected.desc}`
+    );
+  });
+
   bot.command(['help', 'ajuda'], async (ctx) => {
     const ttlHours = Number(process.env.TELEGRAM_SESSION_TTL_HOURS) || 2;
     await ctx.replyWithMarkdown(
       '🤖 *NumIA - Assistente Autônomo e Bot de Aprovação*\n\n' +
-      '• *Conversar e Executar:* Envie qualquer mensagem ou pedido em texto (ex: "pesquise as notícias de hoje", "escreva um código em Python") e o agente Gemini CLI executará para você.\n' +
-      '• *Multimodal:* Envie fotos ou documentos de imagens (avulsas ou em álbuns de até 10 imagens) para análise visual e OCR.\n' +
-      '• *Aprovações Muse:* Ferramentas sensíveis acionadas requerem confirmação com os botões inline.\n' +
-      '• `/status`: Consulta o status do servidor, quota e retenção.\n' +
-      `• *Limpeza Automática:* Inatividade maior que ${ttlHours}h apaga arquivos e inicia nova conversa.\n` +
-      '• `/reset`: Limpa o contexto recente e os arquivos temporários imediatamente.'
+      '• *Conversar e Executar:* Envie qualquer mensagem ou dúvida (ex: "resolva essa lista de cálculo", "escreva um código em Python") e o agente Gemini CLI responderá diretamente.\n' +
+      '• *Multimodal:* Envie fotos ou documentos de imagens (avulsas ou em álbuns de até 10 imagens) para resolução visual de exercícios e OCR.\n' +
+      '• *Fórmulas Matemáticas:* Notação adaptada com caracteres Unicode limpos (ex: x², √x, r > d/2, L₁₁ ≈ 2,82 cm, AB = 10 cm).\n' +
+      '• \`/model\`: Escolha a velocidade do Gemini (\`/model turbo\`, \`/model flash\`, \`/model pensar\`, \`/model pro\`).\n' +
+      '• \`/status\`: Consulta status do servidor, modelo ativo e retenção de arquivos.\n' +
+      `• *Limpeza Automática:* Inatividade maior que ${ttlHours}h limpa arquivos e inicia nova conversa.\n` +
+      '• \`/reset\`: Limpa o contexto recente e os arquivos temporários imediatamente.'
     );
   });
 
@@ -530,6 +831,8 @@ export function initTelegramBot(customToken?: string): Telegraf<Context> | null 
     }
   }
 
+  const activeChatTurns = new Set<string>();
+
   async function handleUserChatTurn(
     ctx: Context,
     prompt: string,
@@ -545,6 +848,13 @@ export function initTelegramBot(customToken?: string): Telegraf<Context> | null 
     const session = getChatSession(chatId);
     const conversationId = session.conversationId;
 
+    if (activeChatTurns.has(conversationId)) {
+      await ctx.reply('⏳ *Aguarde:* O Gemini já está processando sua mensagem anterior. Assim que concluir, envie sua próxima pergunta.', { parse_mode: 'Markdown' })
+        .catch(() => ctx.reply('⏳ Aguarde: O Gemini já está processando sua mensagem anterior. Assim que concluir, envie sua próxima pergunta.'));
+      return;
+    }
+    activeChatTurns.add(conversationId);
+
     if (session.isNewSession) {
       await ctx.reply('ℹ️ *Sessão anterior encerrada por inatividade. Arquivos anteriores apagados para poupar espaço no servidor.*', { parse_mode: 'Markdown' })
         .catch(() => undefined);
@@ -557,7 +867,7 @@ export function initTelegramBot(customToken?: string): Telegraf<Context> | null 
     }, 4000);
 
     try {
-      const response = await registeredTelegramPromptHandler(prompt, conversationId, chatId, images);
+      const response = await registeredTelegramPromptHandler(prompt, conversationId, chatId, images, session.model);
       clearInterval(typingTimer);
 
       if (!response) {
@@ -565,20 +875,17 @@ export function initTelegramBot(customToken?: string): Telegraf<Context> | null 
         return;
       }
 
-      // Se a resposta for longa (> 4000 caracteres), divide em múltiplos envios (limite do Telegram: 4096)
-      const maxChunk = 4000;
-      for (let i = 0; i < response.length; i += maxChunk) {
-        const chunk = response.slice(i, i + maxChunk);
-        try {
-          await ctx.replyWithMarkdown(chunk);
-        } catch {
-          await ctx.reply(chunk);
-        }
+      const chunks = splitMessageChunks(response, 3900);
+      for (const chunk of chunks) {
+        await sendTelegramChunk(ctx, chunk);
       }
     } catch (error) {
       clearInterval(typingTimer);
       const errMsg = (error as Error).message || 'Erro ao processar mensagem.';
       await ctx.reply(`❌ Ocorreu um erro ao processar sua solicitação com o Gemini CLI:\n${errMsg}`).catch(() => undefined);
+    } finally {
+      clearInterval(typingTimer);
+      activeChatTurns.delete(conversationId);
     }
   }
 
@@ -777,6 +1084,8 @@ export async function sendApproval(
   return id;
 }
 
+const processedUpdates = new Set<number>();
+
 /**
  * Processa uma atualização de webhook recebida do Telegram
  */
@@ -788,6 +1097,18 @@ export async function handleTelegramWebhook(update: unknown): Promise<{ ok: bool
 
   if (!update || typeof update !== 'object') {
     return { ok: false, message: 'Corpo da requisição de webhook inválido.' };
+  }
+
+  const updateObj = update as { update_id?: number };
+  if (typeof updateObj.update_id === 'number') {
+    if (processedUpdates.has(updateObj.update_id)) {
+      return { ok: true };
+    }
+    processedUpdates.add(updateObj.update_id);
+    if (processedUpdates.size > 2000) {
+      const first = processedUpdates.values().next().value;
+      if (first !== undefined) processedUpdates.delete(first);
+    }
   }
 
   try {

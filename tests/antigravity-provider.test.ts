@@ -52,6 +52,11 @@ describe('Antigravity CLI arguments', () => {
       effort: 'high'
     })).toEqual(expect.arrayContaining(['--effort', 'low']));
   });
+
+  it('inclui --disable-slash-commands quando disableSlashCommands for verdadeiro', () => {
+    const args = buildAntigravityArgs({ ...baseRequest, disableSlashCommands: true }, 300_000);
+    expect(args).toContainEqual('--disable-slash-commands');
+  });
 });
 
 describe('dynamic Antigravity discovery', () => {

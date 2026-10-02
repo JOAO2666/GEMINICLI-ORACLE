@@ -16,7 +16,9 @@ import {
   setDatabase,
   registerResumptionHandler,
   registerTelegramPromptHandler,
-  ensureApprovalsTable
+  ensureApprovalsTable,
+  formatMathForTelegram,
+  splitMessageChunks
 } from '../src/telegram.js';
 import type { AIProvider, ProviderEvent, ProviderRequest } from '../src/types.js';
 
@@ -449,6 +451,39 @@ describe('Aprovação Estilo Muse via Telegram', () => {
 
     expect(webhookRes.ok).toBe(true);
     expect(capturedPrompt).toBe('Olá Gemini, faça um resumo das notícias de tecnologia.');
+  });
+
+  it('formata fórmulas matemáticas LaTeX para Unicode legível no Telegram', () => {
+    const rawOutput = [
+      'Na reta $AB$, a mediatriz passa pelo ponto médio.',
+      'Arcos congruentes de raio $r > \\frac{d}{2}$ com centros nos extremos geram $P_1$ e $P_2$.',
+      'A corda vale $L_{11} \\approx 2{,}82\\text{ cm}$ com raio $R = 2\\text{ cm}$.',
+      'Consulte o arquivo [walkthrough.md](file:///home/node/walkthrough.md).'
+    ].join('\n');
+
+    const formatted = formatMathForTelegram(rawOutput);
+
+    expect(formatted).not.toContain('$AB$');
+    expect(formatted).toContain('Na reta AB');
+    expect(formatted).toContain('r > d/2');
+    expect(formatted).toContain('P₁ e P₂');
+    expect(formatted).toContain('L₁₁ ≈ 2,82 cm');
+    expect(formatted).toContain('R = 2 cm');
+    expect(formatted).not.toContain('file:///home/node/walkthrough.md');
+    expect(formatted).toContain('📄 *walkthrough.md*');
+  });
+
+  it('divide mensagens longas respeitando limites do Telegram sem quebrar palavras', () => {
+    const paragraph1 = 'A'.repeat(2000);
+    const paragraph2 = 'B'.repeat(2500);
+    const longMessage = `${paragraph1}\n\n${paragraph2}`;
+
+    const chunks = splitMessageChunks(longMessage, 3900);
+    expect(chunks.length).toBe(2);
+    expect(chunks[0]?.length).toBeLessThanOrEqual(3900);
+    expect(chunks[1]?.length).toBeLessThanOrEqual(3900);
+    expect(chunks[0]).toBe(paragraph1);
+    expect(chunks[1]).toBe(paragraph2);
   });
 });
 

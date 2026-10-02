@@ -151,9 +151,10 @@ export async function buildApp(
     return responseText;
   });
 
-  registerTelegramPromptHandler(async (prompt, conversationId, _chatId, images = []) => {
-    app.log.info({ conversationId, imageCount: images.length }, 'Processando mensagem do Telegram com o Antigravity CLI');
-    db.ensureConversation(conversationId, config.DEFAULT_MODEL);
+  registerTelegramPromptHandler(async (prompt, conversationId, _chatId, images = [], modelOverride?: string) => {
+    const selectedModel = modelOverride || config.TELEGRAM_MODEL || config.DEFAULT_MODEL;
+    app.log.info({ conversationId, model: selectedModel, imageCount: images.length }, 'Processando mensagem do Telegram com o Antigravity CLI');
+    db.ensureConversation(conversationId, selectedModel);
     db.addMessage(conversationId, 'user', prompt);
 
     const workingDirectory = files.conversationDirectory(conversationId);
@@ -172,29 +173,47 @@ export async function buildApp(
     if (savedImagePaths.length > 0) {
       finalPrompt = await addLocalImageOcr(
         prompt,
-        config.DEFAULT_MODEL,
+        selectedModel,
         savedImagePaths,
         config.IMAGE_OCR_TIMEOUT_MS
       );
       finalPrompt += '\n\n' + savedImagePaths.map((p) => `[Imagem anexada: @${p}]`).join('\n');
     }
 
+    const systemInstructions = [
+      'Você é o assistente inteligente oficial do usuário no aplicativo de mensagens Telegram.',
+      'DIRETRIZES DE RESPOSTA, VELOCIDADE E FORMATAÇÃO:',
+      '1. Responda DIRETAMENTE e de forma completa, ágil, clara e didática.',
+      '2. NÃO crie arquivos, diagramas .svg ou planos no disco a menos que o usuário peça explicitamente para salvar um arquivo. Resolva e explique tudo diretamente no texto da resposta.',
+      '3. NUNCA gere links locais como "file:///" ou caminhos de arquivos internos do servidor.',
+      '4. FORMATAÇÃO E MATEMÁTICA: O Telegram NÃO suporta LaTeX/MathJax. NUNCA use tags com cifrões ($ ou $$) nem comandos como \\frac, \\text, \\approx, \\times.',
+      '   Escreva todas as fórmulas, expressões matemáticas e unidades com símbolos Unicode legíveis (ex: x², √x, r > d/2, L₁₁ ≈ 2,82 cm, AB = 10 cm, P₁, P₂, 90°, α, β, π, ±, ×, ÷, ≤, ≥, ≠).',
+      '   Para contas passo a passo ou equações longas, use passos numerados ou blocos de código com recuo.',
+      savedImagePaths.length > 0
+        ? '5. Imagens anexadas: use a ferramenta view_file no caminho indicado para visualizar a imagem com visão computacional nativa e resolva o exercício ou dúvida de imediato.'
+        : ''
+    ].filter(Boolean).join('\n');
+
+    const promptWithInstructions = `${systemInstructions}\n\n=== MENSAGEM DO USUÁRIO ===\n${finalPrompt}`;
+
     let responseText = '';
     if (provider.sendMessageDetailed) {
       const detailed = await provider.sendMessageDetailed({
         conversationId,
-        prompt: finalPrompt,
-        model: config.DEFAULT_MODEL,
+        prompt: promptWithInstructions,
+        model: selectedModel,
         workingDirectory,
+        disableSlashCommands: true,
         autoApprove: true
       });
       responseText = detailed.text;
     } else {
       responseText = await provider.sendMessage({
         conversationId,
-        prompt: finalPrompt,
-        model: config.DEFAULT_MODEL,
+        prompt: promptWithInstructions,
+        model: selectedModel,
         workingDirectory,
+        disableSlashCommands: true,
         autoApprove: true
       });
     }

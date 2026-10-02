@@ -63,7 +63,8 @@ const envSchema = z.object({
   REQUIRE_HTTPS: bool,
   TELEGRAM_BOT_TOKEN: z.string().default(''),
   TELEGRAM_CHAT_ID: z.string().default(''),
-  TELEGRAM_SESSION_TTL_HOURS: positiveInt(2)
+  TELEGRAM_SESSION_TTL_HOURS: positiveInt(2),
+  TELEGRAM_MODEL: z.string().default('gemini-3.8-flash-medium')
 });
 
 export type Config = ReturnType<typeof loadConfig>;

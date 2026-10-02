@@ -25,6 +25,7 @@ export interface ProviderRequest {
   autoApprove?: boolean;
   jsonSchema?: Record<string, unknown>;
   sandbox?: boolean;
+  disableSlashCommands?: boolean;
 }
 
 export interface ProviderStatus {
