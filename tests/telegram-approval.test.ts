@@ -19,7 +19,8 @@ import {
   registerTelegramPromptHandler,
   ensureApprovalsTable,
   formatMathForTelegram,
-  splitMessageChunks
+  splitMessageChunks,
+  TelegramStreamWriter
 } from '../src/telegram.js';
 import type { AIProvider, ProviderEvent, ProviderRequest } from '../src/types.js';
 
@@ -546,6 +547,71 @@ describe('Aprovação Estilo Muse via Telegram', () => {
     } finally {
       await app.close();
     }
+  });
+
+  it('gerencia streaming de tokens em tempo real com TelegramStreamWriter', async () => {
+    const edits: string[] = [];
+    let initialMessageSent = false;
+    let nextMessageId = 101;
+
+    const mockCtx = {
+      chat: { id: 12345 },
+      async reply(_text: string) {
+        initialMessageSent = true;
+        return { message_id: nextMessageId++ };
+      },
+      telegram: {
+        async editMessageText(_chatId: any, _msgId: any, _inline: any, text: string) {
+          edits.push(text);
+        }
+      }
+    } as any;
+
+    const writer = new TelegramStreamWriter(mockCtx, 12345, 10);
+    await writer.start();
+    expect(initialMessageSent).toBe(true);
+
+    await writer.append('Olá', 'Olá');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(edits.length).toBeGreaterThan(0);
+    expect(edits[edits.length - 1]).toContain('Olá ▍');
+
+    await writer.append(' mundo!', 'Olá mundo!');
+    await new Promise((r) => setTimeout(r, 50));
+    expect(edits[edits.length - 1]).toContain('Olá mundo! ▍');
+
+    await writer.finish('Olá mundo final! Consulte $AB$ e $r > d/2$.');
+    const finalEdit = edits[edits.length - 1];
+    expect(finalEdit).not.toContain('▍');
+    expect(finalEdit).not.toContain('$AB$');
+    expect(finalEdit).toContain('AB');
+    expect(finalEdit).toContain('r > d/2');
+  });
+
+  it('notifica deltas de streaming em tempo real durante processamento de mensagem', async () => {
+    let calledWithProgress = false;
+    registerTelegramPromptHandler(async (_prompt, _convId, _chatId, _images, _model, onProgress) => {
+      if (onProgress) {
+        calledWithProgress = true;
+        await onProgress('Primeiro ', 'Primeiro ');
+        await onProgress('segundo ', 'Primeiro segundo ');
+      }
+      return 'Primeiro segundo.';
+    });
+
+    const webhookRes = await handleTelegramWebhook({
+      update_id: 10006,
+      message: {
+        message_id: 999,
+        from: { id: 987654321, is_bot: false, first_name: 'João' },
+        chat: { id: 987654321, type: 'private' },
+        date: 1600000000,
+        text: 'Teste de streaming de resposta'
+      }
+    });
+
+    expect(webhookRes.ok).toBe(true);
+    expect(calledWithProgress).toBe(true);
   });
 });
 

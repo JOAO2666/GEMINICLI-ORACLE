@@ -18,7 +18,7 @@ import { ChatService } from './services/chat.js';
 import { FileService } from './services/files.js';
 import { AntigravityCLIProvider } from './services/antigravity-provider.js';
 import { AntigravityCommandRegistry } from './services/antigravity-command-registry.js';
-import type { AIProvider, ProviderEvent } from './types.js';
+import type { AIProvider, ProviderEvent, ProviderRequest } from './types.js';
 import {
   formatOpenAIUsage,
   openAIChunk,
@@ -48,7 +48,8 @@ import {
   registerTelegramSessionCleanup,
   startTelegramJanitor,
   stopTelegramJanitor,
-  initTelegramBot
+  initTelegramBot,
+  type TelegramStreamProgressCallback
 } from './telegram.js';
 
 function tokenMatches(header: string | undefined, expected: string): boolean {
@@ -124,23 +125,21 @@ export async function buildApp(
     ].join('\n');
 
     let responseText = '';
+    const resumeRequest: ProviderRequest = {
+      conversationId: approval.conversationId,
+      prompt: continuationPrompt,
+      model,
+      workingDirectory,
+      executionMode: 'accept-edits',
+      sandbox: false,
+      disableSlashCommands: true,
+      autoApprove: true
+    };
     if (provider.sendMessageDetailed) {
-      const detailed = await provider.sendMessageDetailed({
-        conversationId: approval.conversationId,
-        prompt: continuationPrompt,
-        model,
-        workingDirectory,
-        autoApprove: true
-      });
+      const detailed = await provider.sendMessageDetailed(resumeRequest);
       responseText = detailed.text;
     } else {
-      responseText = await provider.sendMessage({
-        conversationId: approval.conversationId,
-        prompt: continuationPrompt,
-        model,
-        workingDirectory,
-        autoApprove: true
-      });
+      responseText = await provider.sendMessage(resumeRequest);
     }
 
     try {
@@ -152,7 +151,14 @@ export async function buildApp(
     return responseText;
   });
 
-  registerTelegramPromptHandler(async (prompt, conversationId, _chatId, images = [], modelOverride?: string) => {
+  registerTelegramPromptHandler(async (
+    prompt,
+    conversationId,
+    _chatId,
+    images = [],
+    modelOverride?: string,
+    onProgress?: TelegramStreamProgressCallback
+  ) => {
     const selectedModel = modelOverride || config.TELEGRAM_MODEL || config.DEFAULT_MODEL;
     app.log.info({ conversationId, model: selectedModel, imageCount: images.length }, 'Processando mensagem do Telegram com o Antigravity CLI');
     db.ensureConversation(conversationId, selectedModel);
@@ -211,26 +217,57 @@ export async function buildApp(
     let responseText = '';
     let sessionId: string | undefined;
 
-    if (provider.sendMessageDetailed) {
-      const detailed = await provider.sendMessageDetailed({
-        conversationId,
-        prompt: promptWithInstructions,
-        model: selectedModel,
-        workingDirectory,
-        disableSlashCommands: true,
-        autoApprove: true
-      });
+    const streamRequest: ProviderRequest = {
+      conversationId,
+      prompt: promptWithInstructions,
+      model: selectedModel,
+      workingDirectory,
+      executionMode: 'accept-edits',
+      sandbox: false,
+      disableSlashCommands: true,
+      autoApprove: true
+    };
+
+    if (provider.streamMessage) {
+      for await (const event of provider.streamMessage(streamRequest)) {
+        if (event.type === 'delta') {
+          responseText += event.text;
+          if (onProgress) {
+            try {
+              await onProgress(event.text, responseText);
+            } catch {
+              // ignore
+            }
+          }
+        } else if (event.type === 'tool') {
+          if (onProgress) {
+            try {
+              const toolName = event.name || 'ferramenta';
+              const friendlyName = toolName === 'view_file'
+                ? 'Analisando imagem...'
+                : toolName === 'generate_image'
+                  ? 'Gerando imagem...'
+                  : toolName === 'write_to_file' || toolName === 'replace_file_content'
+                    ? 'Criando arquivos...'
+                    : `Executando ${toolName}...`;
+              await onProgress('', responseText, friendlyName);
+            } catch {
+              // ignore
+            }
+          }
+        } else if (event.type === 'complete') {
+          sessionId = event.sessionId;
+          if (event.text) {
+            responseText = event.text;
+          }
+        }
+      }
+    } else if (provider.sendMessageDetailed) {
+      const detailed = await provider.sendMessageDetailed(streamRequest);
       responseText = detailed.text;
       sessionId = detailed.sessionId;
     } else {
-      responseText = await provider.sendMessage({
-        conversationId,
-        prompt: promptWithInstructions,
-        model: selectedModel,
-        workingDirectory,
-        disableSlashCommands: true,
-        autoApprove: true
-      });
+      responseText = await provider.sendMessage(streamRequest);
     }
 
     // Identificação e coleta de arquivos gerados durante a interação

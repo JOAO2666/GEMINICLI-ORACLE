@@ -74,13 +74,21 @@ export interface TelegramPromptResult {
   files?: TelegramGeneratedFile[];
 }
 
+// Callback para atualização de streaming em tempo real no Telegram
+export type TelegramStreamProgressCallback = (
+  delta: string,
+  fullText: string,
+  status?: string
+) => Promise<void> | void;
+
 // Tipo e handler registrado para responder mensagens e imagens diretamente com o Gemini CLI
 export type TelegramPromptHandler = (
   prompt: string,
   conversationId: string,
   chatId: number | string,
   images?: TelegramImageAttachment[],
-  model?: string
+  model?: string,
+  onProgress?: TelegramStreamProgressCallback
 ) => Promise<string | TelegramPromptResult>;
 
 let registeredTelegramPromptHandler: TelegramPromptHandler | null = null;
@@ -579,6 +587,244 @@ export async function sendTelegramChunk(ctx: Context, chunk: string): Promise<vo
 }
 
 /**
+ * Gerenciador de streaming de mensagens em tempo real para o Telegram estilo ChatGPT / DeepSeek.
+ * Realiza updates periódicos com throttling (evitando erro 429 Too Many Requests) e divide mensagens
+ * que excedem o limite de caracteres do Telegram.
+ */
+export class TelegramStreamWriter {
+  private currentMessageId: number | null = null;
+  private messageIds: number[] = [];
+  private accumulatedText = '';
+  private currentChunk = '';
+  private lastEditAt = 0;
+  private isEditing = false;
+  private editTimer: NodeJS.Timeout | null = null;
+  private closed = false;
+  private pendingText: string | null = null;
+  private lastStatus = '';
+
+  constructor(
+    private readonly ctx: Context,
+    private readonly chatId: number | string,
+    private readonly throttleMs = 900
+  ) {}
+
+  async start(): Promise<void> {
+    if (this.currentMessageId) return;
+    try {
+      const msg = await this.ctx.reply('💭 Pensando...');
+      this.currentMessageId = msg.message_id;
+      this.messageIds.push(msg.message_id);
+      this.lastEditAt = Date.now();
+    } catch (e) {
+      console.warn('[Telegram] Falha ao enviar mensagem inicial de streaming:', (e as Error).message);
+    }
+  }
+
+  async append(delta: string, fullText: string, status?: string): Promise<void> {
+    if (this.closed) return;
+    this.accumulatedText = fullText;
+    if (status) this.lastStatus = status;
+
+    if (!this.currentMessageId) {
+      await this.start();
+    }
+
+    if (delta) {
+      if (this.currentChunk.length >= 3800) {
+        await this.flushCurrentChunkAndStartNew();
+      }
+      this.currentChunk += delta;
+      this.scheduleEdit(this.currentChunk);
+    } else if (status && !this.currentChunk) {
+      this.scheduleEdit('');
+    }
+  }
+
+  private scheduleEdit(text: string): void {
+    if (this.closed) return;
+    this.pendingText = text;
+    const now = Date.now();
+    const elapsed = now - this.lastEditAt;
+
+    if (elapsed >= this.throttleMs && !this.isEditing) {
+      void this.performEdit();
+    } else if (!this.editTimer) {
+      const waitMs = Math.max(0, this.throttleMs - elapsed);
+      this.editTimer = setTimeout(() => {
+        this.editTimer = null;
+        void this.performEdit();
+      }, waitMs);
+    }
+  }
+
+  private async performEdit(): Promise<void> {
+    if (this.isEditing || !this.currentMessageId || this.closed) {
+      return;
+    }
+    this.isEditing = true;
+    const textToEdit = this.pendingText;
+    this.pendingText = null;
+    this.lastEditAt = Date.now();
+
+    try {
+      let displayText: string;
+      if (textToEdit && textToEdit.trim().length > 0) {
+        displayText = `${textToEdit} ▍`;
+      } else if (this.lastStatus) {
+        displayText = `💭 ${this.lastStatus} ▍`;
+      } else {
+        displayText = '✍️ ...';
+      }
+
+      await this.ctx.telegram.editMessageText(
+        this.chatId,
+        this.currentMessageId,
+        undefined,
+        displayText
+      );
+    } catch (err: any) {
+      const msg = String(err?.message || '');
+      if (msg.includes('message is not modified') || msg.includes('message to edit not found')) {
+        // Ok
+      } else if (msg.includes('Too Many Requests')) {
+        const retryAfter = Number(err?.parameters?.retry_after) || 2;
+        this.lastEditAt = Date.now() + (retryAfter * 1000);
+      }
+    } finally {
+      this.isEditing = false;
+      if (this.pendingText !== null && !this.closed && !this.editTimer) {
+        this.scheduleEdit(this.pendingText);
+      }
+    }
+  }
+
+  private async flushCurrentChunkAndStartNew(): Promise<void> {
+    if (this.editTimer) {
+      clearTimeout(this.editTimer);
+      this.editTimer = null;
+    }
+    this.pendingText = null;
+
+    if (this.currentMessageId && this.currentChunk) {
+      const formatted = formatMathForTelegram(this.currentChunk);
+      try {
+        await this.ctx.telegram.editMessageText(
+          this.chatId,
+          this.currentMessageId,
+          undefined,
+          formatted,
+          { parse_mode: 'Markdown' }
+        );
+      } catch {
+        try {
+          await this.ctx.telegram.editMessageText(
+            this.chatId,
+            this.currentMessageId,
+            undefined,
+            formatted
+          );
+        } catch { /* ignore */ }
+      }
+    }
+
+    this.currentChunk = '';
+    try {
+      const newMsg = await this.ctx.reply('✍️ ...');
+      this.currentMessageId = newMsg.message_id;
+      this.messageIds.push(newMsg.message_id);
+      this.lastEditAt = Date.now();
+    } catch (e) {
+      console.warn('[Telegram] Falha ao criar mensagem subsequente de streaming:', (e as Error).message);
+    }
+  }
+
+  async finish(finalText?: string, hasFiles = false): Promise<void> {
+    this.closed = true;
+    if (this.editTimer) {
+      clearTimeout(this.editTimer);
+      this.editTimer = null;
+    }
+
+    const rawText = (this.messageIds.length <= 1)
+      ? (finalText || this.accumulatedText || this.currentChunk)
+      : (this.currentChunk || finalText || this.accumulatedText);
+
+    if (!rawText || !rawText.trim()) {
+      if (this.currentMessageId) {
+        try {
+          if (hasFiles) {
+            await this.ctx.telegram.editMessageText(
+              this.chatId,
+              this.currentMessageId,
+              undefined,
+              '✅ Arquivos gerados com sucesso:'
+            );
+          } else {
+            await this.ctx.telegram.editMessageText(
+              this.chatId,
+              this.currentMessageId,
+              undefined,
+              '(Sem conteúdo de resposta)'
+            );
+          }
+        } catch { /* ignore */ }
+      }
+      return;
+    }
+
+    if (this.currentMessageId) {
+      const formatted = formatMathForTelegram(rawText);
+      try {
+        await this.ctx.telegram.editMessageText(
+          this.chatId,
+          this.currentMessageId,
+          undefined,
+          formatted,
+          { parse_mode: 'Markdown' }
+        );
+      } catch {
+        try {
+          await this.ctx.telegram.editMessageText(
+            this.chatId,
+            this.currentMessageId,
+            undefined,
+            formatted
+          );
+        } catch (e) {
+          console.warn('[Telegram] Falha ao finalizar edição com markdown:', (e as Error).message);
+        }
+      }
+    } else {
+      const chunks = splitMessageChunks(rawText, 3900);
+      for (const chunk of chunks) {
+        await sendTelegramChunk(this.ctx, chunk);
+      }
+    }
+  }
+
+  async fail(errorMessage: string): Promise<void> {
+    this.closed = true;
+    if (this.editTimer) {
+      clearTimeout(this.editTimer);
+      this.editTimer = null;
+    }
+    if (this.currentMessageId) {
+      try {
+        await this.ctx.telegram.editMessageText(
+          this.chatId,
+          this.currentMessageId,
+          undefined,
+          `❌ Ocorreu um erro ao processar sua solicitação com o Gemini CLI:\n${errorMessage}`
+        );
+        return;
+      } catch { /* ignore */ }
+    }
+    await this.ctx.reply(`❌ Ocorreu um erro ao processar sua solicitação com o Gemini CLI:\n${errorMessage}`).catch(() => undefined);
+  }
+}
+
+/**
  * Inicializa a instância do bot Telegraf e registra os handlers de callback e comandos
  */
 export function initTelegramBot(customToken?: string): Telegraf<Context> | null {
@@ -874,6 +1120,9 @@ export function initTelegramBot(customToken?: string): Telegraf<Context> | null 
         .catch(() => undefined);
     }
 
+    const streamWriter = new TelegramStreamWriter(ctx, chatId);
+    await streamWriter.start().catch(() => undefined);
+
     // Envia ação de digitação a cada 4s enquanto o modelo processa
     await ctx.sendChatAction('typing').catch(() => undefined);
     const typingTimer = setInterval(() => {
@@ -881,23 +1130,22 @@ export function initTelegramBot(customToken?: string): Telegraf<Context> | null 
     }, 4000);
 
     try {
-      const response = await registeredTelegramPromptHandler(prompt, conversationId, chatId, images, session.model);
+      const response = await registeredTelegramPromptHandler(
+        prompt,
+        conversationId,
+        chatId,
+        images,
+        session.model,
+        async (delta, fullText, status) => {
+          await streamWriter.append(delta, fullText, status);
+        }
+      );
       clearInterval(typingTimer);
 
       const responseText = typeof response === 'string' ? response : (response?.text ?? '');
       const generatedFiles = typeof response === 'object' && Array.isArray(response?.files) ? response.files : [];
 
-      if (!responseText && generatedFiles.length === 0) {
-        await ctx.reply('(Sem conteúdo de resposta)').catch(() => undefined);
-        return;
-      }
-
-      if (responseText) {
-        const chunks = splitMessageChunks(responseText, 3900);
-        for (const chunk of chunks) {
-          await sendTelegramChunk(ctx, chunk);
-        }
-      }
+      await streamWriter.finish(responseText, generatedFiles.length > 0);
 
       if (generatedFiles.length > 0) {
         for (const file of generatedFiles) {
@@ -943,7 +1191,7 @@ export function initTelegramBot(customToken?: string): Telegraf<Context> | null 
     } catch (error) {
       clearInterval(typingTimer);
       const errMsg = (error as Error).message || 'Erro ao processar mensagem.';
-      await ctx.reply(`❌ Ocorreu um erro ao processar sua solicitação com o Gemini CLI:\n${errMsg}`).catch(() => undefined);
+      await streamWriter.fail(errMsg);
     } finally {
       clearInterval(typingTimer);
       activeChatTurns.delete(conversationId);
