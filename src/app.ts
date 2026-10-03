@@ -731,6 +731,8 @@ export async function buildApp(
             prompt: preparedPrompt,
             model,
             workingDirectory: prepared.workingDirectory,
+            executionMode: 'accept-edits',
+            sandbox: false,
             autoApprove: prepared.imageCount > 0,
             jsonSchema: prepared.toolContext.outputSchema,
             signal: controller.signal
@@ -786,6 +788,8 @@ export async function buildApp(
               prompt: preparedPrompt,
               model,
               workingDirectory: prepared.workingDirectory,
+              executionMode: 'accept-edits',
+              sandbox: false,
               autoApprove: prepared.imageCount > 0,
               signal: controller.signal
             });
@@ -798,6 +802,8 @@ export async function buildApp(
               prompt: preparedPrompt,
               model,
               workingDirectory: prepared.workingDirectory,
+              executionMode: 'accept-edits',
+              sandbox: false,
               autoApprove: prepared.imageCount > 0,
               signal: controller.signal
             });
@@ -852,6 +858,8 @@ export async function buildApp(
           prompt: preparedPrompt,
           model,
           workingDirectory: prepared.workingDirectory,
+          executionMode: 'accept-edits',
+          sandbox: false,
           autoApprove: prepared.imageCount > 0,
           jsonSchema: prepared.toolContext.outputSchema,
           signal: controller.signal
@@ -917,6 +925,8 @@ export async function buildApp(
         prompt: preparedPrompt,
         model,
         workingDirectory: prepared.workingDirectory,
+        executionMode: 'accept-edits',
+        sandbox: false,
         autoApprove: prepared.imageCount > 0,
         signal: controller.signal
       })) {
@@ -1039,11 +1049,27 @@ export async function buildApp(
     let text = '';
     let stats: unknown;
     if (provider.sendMessageDetailed) {
-      const detailed = await provider.sendMessageDetailed({ conversationId: input.conversationId, prompt, model, workingDirectory, signal });
+      const detailed = await provider.sendMessageDetailed({
+        conversationId: input.conversationId,
+        prompt,
+        model,
+        workingDirectory,
+        executionMode: 'accept-edits',
+        sandbox: false,
+        signal
+      });
       text = detailed.text;
       stats = detailed.usage;
     } else {
-      text = await provider.sendMessage({ conversationId: input.conversationId, prompt, model, workingDirectory, signal });
+      text = await provider.sendMessage({
+        conversationId: input.conversationId,
+        prompt,
+        model,
+        workingDirectory,
+        executionMode: 'accept-edits',
+        sandbox: false,
+        signal
+      });
     }
     const assistant = db.addMessage(input.conversationId, 'assistant', text);
     const durationSeconds = (Date.now() - startExec) / 1000;
@@ -1075,7 +1101,15 @@ export async function buildApp(
     });
     const emit = (event: ProviderEvent) => reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
     try {
-      for await (const event of provider.streamMessage({ conversationId: input.conversationId, prompt, model, workingDirectory, signal: controller.signal })) {
+      for await (const event of provider.streamMessage({
+        conversationId: input.conversationId,
+        prompt,
+        model,
+        workingDirectory,
+        executionMode: 'accept-edits',
+        sandbox: false,
+        signal: controller.signal
+      })) {
         emit(event);
         if (event.type === 'complete') {
           db.addMessage(input.conversationId, 'assistant', event.text);
