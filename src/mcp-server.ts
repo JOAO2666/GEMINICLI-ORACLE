@@ -8,6 +8,7 @@ import { AntigravityCommandRegistry } from './services/antigravity-command-regis
 import { formatUsageBars } from './services/antigravity-provider.js';
 import { McpWorkspaceService } from './mcp-workspaces.js';
 import { searchWeb, fetchWebContent } from './services/web-search.js';
+import { generateCodeSnippetImage } from './services/code-snippet.js';
 
 const readOnly = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const localWrite = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
@@ -332,6 +333,57 @@ export function createWorkspaceMcpEndpoint(
       annotations: readOnly
     }, ({ workspace_id, artifact_id }) => guarded(() => workspaces.artifactGet(workspace_id, artifact_id)));
 
+    server.registerTool('generate_code_snippet_image', {
+      title: 'Gerar imagem de snippet de código estilizado',
+      description: 'Gera uma imagem elegante em PNG contendo um snippet de código estilizado via ray.so.',
+      inputSchema: z.object({
+        code: z.string().min(1).describe('O código-fonte a ser renderizado.'),
+        language: z.string().default('auto').describe('Linguagem para syntax highlight (ex: python, javascript, rust, c, etc.).'),
+        title: z.string().default('').describe('Título exibido na barra superior da janela do snippet.'),
+        theme: z.enum(['candy', 'breeze', 'crimson', 'falcon', 'meadow', 'midnight', 'raindrop', 'sunset']).default('candy').describe('Tema visual (candy, breeze, crimson, falcon, meadow, midnight, raindrop, sunset).'),
+        darkMode: z.boolean().default(true).describe('Alterna entre modo escuro e claro.'),
+        spacing: z.union([z.enum(['16', '32', '64', '128']), z.number()]).default('32').describe('Padding da imagem (16, 32, 64, 128).'),
+        background: z.boolean().default(true).describe('Habilita o fundo com gradiente.')
+      }),
+      annotations: readOnly
+    }, async (params) => {
+      try {
+        const snippet = await generateCodeSnippetImage({
+          code: params.code,
+          language: params.language,
+          title: params.title,
+          theme: params.theme,
+          darkMode: params.darkMode,
+          spacing: String(params.spacing),
+          background: params.background
+        });
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: snippet.message
+            },
+            {
+              type: 'image' as const,
+              data: snippet.data,
+              mimeType: snippet.mimeType
+            }
+          ]
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Falha inesperada ao renderizar snippet.';
+        return {
+          isError: true,
+          content: [
+            {
+              type: 'text' as const,
+              text: `Erro ao gerar imagem do snippet de código: ${message}`
+            }
+          ]
+        };
+      }
+    });
+
     server.registerTool('commands', {
       title: 'Comandos rápidos e catálogo de ferramentas',
       description: 'Exibe o catálogo de comandos rápidos de chat (/models, /model, /usage, /quota, /status, /help, /update), ferramentas MCP do workspace e comandos do Antigravity CLI detectados.',
@@ -353,6 +405,7 @@ export function createWorkspaceMcpEndpoint(
       const workspaceTools = [
         'web_search', 'web_fetch',
         'artifact_create', 'task_run', 'artifact_revise', 'artifact_get',
+        'generate_code_snippet_image',
         'workspace_create', 'workspace_delete', 'workspace_info', 'file_list', 'file_read',
         'file_write', 'file_edit', 'shell_execute', 'git_clone', 'goal_run', 'skill_list',
         'skill_catalog', 'skill_read', 'skill_resources', 'skill_install',

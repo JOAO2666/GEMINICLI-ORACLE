@@ -1,5 +1,6 @@
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY tsconfig.json ./
@@ -9,8 +10,9 @@ RUN npm run build && npm prune --omit=dev
 FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production \
     DATA_DIR=/data \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
     PATH=/home/node/.local/bin:$PATH
-RUN apt-get update && apt-get install -y --no-install-recommends bash bubblewrap ca-certificates curl ffmpeg git poppler-utils python3-minimal python3-pip tesseract-ocr tesseract-ocr-eng tesseract-ocr-por \
+RUN apt-get update && apt-get install -y --no-install-recommends bash bubblewrap ca-certificates chromium curl ffmpeg fonts-liberation fonts-noto-color-emoji git poppler-utils python3-minimal python3-pip tesseract-ocr tesseract-ocr-eng tesseract-ocr-por \
     && python3 -m pip install --break-system-packages --no-cache-dir genanki imageio openpyxl Pillow pypdf python-docx python-pptx reportlab \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /app /data /workspaces /home/node/.gemini \

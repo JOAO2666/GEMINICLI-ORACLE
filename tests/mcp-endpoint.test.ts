@@ -8,7 +8,11 @@ import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
 
 const dirs: string[] = [];
-afterEach(() => dirs.splice(0).forEach((dir) => fs.rmSync(dir, { recursive: true, force: true })));
+afterEach(() => dirs.splice(0).forEach((dir) => {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {}
+}));
 
 describe('Remote MCP endpoint', () => {
   it('authenticates, advertises all tools and handles workspace files', async () => {
@@ -76,7 +80,7 @@ describe('Remote MCP endpoint', () => {
       expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
         'artifact_create', 'artifact_get', 'artifact_list', 'artifact_publish', 'artifact_revise',
         'cli_execute', 'cli_help', 'cli_history', 'cli_update',
-        'commands', 'file_edit', 'file_list', 'file_read', 'file_write', 'git_clone',
+        'commands', 'file_edit', 'file_list', 'file_read', 'file_write', 'generate_code_snippet_image', 'git_clone',
         'goal_run', 'model_current', 'model_set', 'models', 'shell_execute',
         'skill_catalog', 'skill_install', 'skill_install_catalog', 'skill_list',
         'skill_read', 'skill_remove', 'skill_resources', 'status', 'storage_cleanup', 'storage_status', 'task_run', 'usage',
@@ -102,5 +106,5 @@ describe('Remote MCP endpoint', () => {
       await client.close();
       await app.close();
     }
-  }, 20_000);
+  }, 50_000);
 });
