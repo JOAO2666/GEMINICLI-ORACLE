@@ -455,18 +455,20 @@ export async function buildApp(
     if (config.NODE_ENV === 'production' && config.REQUIRE_HTTPS && request.protocol !== 'https') {
       throw new AppError(426, 'HTTPS_REQUIRED', 'HTTPS é obrigatório.');
     }
-    const pathname = request.url.split('?')[0];
+    const pathname = request.url?.split('?')[0] || '';
     const protectedRoute = request.url.startsWith('/api/') || pathname === '/models' || pathname === '/chat/completions'
       || pathname === '/v1/models' || pathname === '/v1/chat/completions';
     if (protectedRoute && !tokenMatches(request.headers.authorization, config.NUMIA_SERVER_TOKEN)) {
       throw new AppError(401, 'UNAUTHORIZED', 'Token de acesso inválido.');
     }
-    if (pathname === '/mcp') {
+    const isMcpRoute = pathname === '/mcp' || pathname.startsWith('/mcp/');
+    if (isMcpRoute) {
       if (request.method === 'HEAD' || request.method === 'OPTIONS') {
         return;
       }
+      const pathToken = pathname.startsWith('/mcp/') ? pathname.slice('/mcp/'.length).split('/')[0] : undefined;
       const query = (request.query || {}) as Record<string, string | undefined>;
-      const queryToken = query.token || query.apiKey || query.access_token || query.key;
+      const queryToken = pathToken || query.token || query.apiKey || query.access_token || query.key;
       const effectiveAuth = request.headers.authorization || (queryToken ? `Bearer ${queryToken}` : undefined);
       if (effectiveAuth && !request.headers.authorization) {
         request.headers.authorization = effectiveAuth;
@@ -554,16 +556,26 @@ export async function buildApp(
   if (mcpEndpoint && mcpWorkspaces) {
     const endpoint = mcpEndpoint;
     const workspaces = mcpWorkspaces;
+    const mcpHandler = async (request: any, reply: any) => {
+      if (request.method === 'HEAD' || request.method === 'OPTIONS') {
+        return reply.code(200).header('content-type', 'application/json').send();
+      }
+      if (request.raw.url && request.raw.url.startsWith('/mcp/')) {
+        const queryIdx = request.raw.url.indexOf('?');
+        request.raw.url = '/mcp' + (queryIdx >= 0 ? request.raw.url.slice(queryIdx) : '');
+      }
+      reply.hijack();
+      await endpoint.nodeHandler(request.raw, reply.raw, request.body);
+    };
     app.route({
       method: ['GET', 'POST', 'DELETE', 'HEAD', 'OPTIONS'],
       url: '/mcp',
-      handler: async (request, reply) => {
-        if (request.method === 'HEAD' || request.method === 'OPTIONS') {
-          return reply.code(200).header('content-type', 'application/json').send();
-        }
-        reply.hijack();
-        await endpoint.nodeHandler(request.raw, reply.raw, request.body);
-      }
+      handler: mcpHandler
+    });
+    app.route({
+      method: ['GET', 'POST', 'DELETE', 'HEAD', 'OPTIONS'],
+      url: '/mcp/*',
+      handler: mcpHandler
     });
     app.get('/artifacts/:workspaceId/:artifactId/:name', async (request, reply) => {
       const params = request.params as { workspaceId: string; artifactId: string; name: string };

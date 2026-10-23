@@ -47,7 +47,7 @@ export async function registerMcpOAuthRoutes(app: FastifyInstance, config: Confi
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
     code_challenge_methods_supported: ['S256'],
-    token_endpoint_auth_methods_supported: ['none'],
+    token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
     scopes_supported: ['mcp:tools'],
     authorization_response_iss_parameter_supported: true,
     client_id_metadata_document_supported: false
@@ -101,7 +101,8 @@ export async function registerMcpOAuthRoutes(app: FastifyInstance, config: Confi
   const validateAuthorization = (raw: unknown) => {
     const input = authorizationSchema.parse(raw);
     const client = store.getClient(input.client_id);
-    if (!client || !client.redirectUris.includes(input.redirect_uri)) throw new AppError(400, 'invalid_request', 'Cliente ou retorno inválido.');
+    const redirectAllowedMatch = client && (client.redirectUris.includes('*') || client.redirectUris.includes(input.redirect_uri) || redirectAllowed(input.redirect_uri));
+    if (!client || !redirectAllowedMatch) throw new AppError(400, 'invalid_request', 'Cliente ou retorno inválido.');
     if (input.resource !== urls.resource) throw new AppError(400, 'invalid_target', 'Resource inválido.');
     if (!input.scope.split(/\s+/).includes('mcp:tools')) throw new AppError(400, 'invalid_scope', 'Escopo mcp:tools obrigatório.');
     return { input, client };

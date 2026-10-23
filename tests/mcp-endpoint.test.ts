@@ -32,6 +32,8 @@ describe('Remote MCP endpoint', () => {
     expect(unauthorized.headers['www-authenticate']).toContain('oauth-protected-resource/mcp');
     const headResponse = await app.inject({ method: 'HEAD', url: '/mcp' });
     expect(headResponse.statusCode).toBe(200);
+    const authorizedWithPathToken = await app.inject({ method: 'HEAD', url: `/mcp/${token}` });
+    expect(authorizedWithPathToken.statusCode).toBe(200);
     const authorizedWithQueryToken = await app.inject({ method: 'POST', url: `/mcp?token=${token}`, payload: {} });
     expect(authorizedWithQueryToken.statusCode).not.toBe(401);
     expect((await app.inject({ method: 'GET', url: '/.well-known/oauth-protected-resource/mcp' })).json())

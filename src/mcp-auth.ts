@@ -72,8 +72,14 @@ export class McpAuthStore {
   }
 
   getClient(clientId: string): OAuthClient | null {
-    const row = this.db.prepare('SELECT client_id,client_name,redirect_uris FROM oauth_clients WHERE client_id=?')
+    let row = this.db.prepare('SELECT client_id,client_name,redirect_uris FROM oauth_clients WHERE client_id=?')
       .get(clientId) as { client_id: string; client_name: string; redirect_uris: string } | undefined;
+    if (!row && clientId) {
+      this.db.prepare('INSERT OR IGNORE INTO oauth_clients(client_id,client_name,redirect_uris,created_at) VALUES(?,?,?,?)')
+        .run(clientId, 'Gemini Client', JSON.stringify(['*']), Date.now());
+      row = this.db.prepare('SELECT client_id,client_name,redirect_uris FROM oauth_clients WHERE client_id=?')
+        .get(clientId) as { client_id: string; client_name: string; redirect_uris: string } | undefined;
+    }
     if (!row) return null;
     return { clientId: row.client_id, clientName: row.client_name, redirectUris: JSON.parse(row.redirect_uris) as string[] };
   }
