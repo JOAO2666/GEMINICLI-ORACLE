@@ -18,5 +18,5 @@ describe('generateCodeSnippetImage', () => {
     expect(typeof result.data).toBe('string');
     expect(result.data.length).toBeGreaterThan(1000);
     expect(result.message).toContain('Snippet de código gerado com sucesso via ray.so');
-  }, 45_000);
+  }, 90_000);
 });

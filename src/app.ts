@@ -462,8 +462,15 @@ export async function buildApp(
       throw new AppError(401, 'UNAUTHORIZED', 'Token de acesso inválido.');
     }
     if (pathname === '/mcp') {
-      const token = bearerToken(request.headers.authorization);
-      const staticAccess = tokenMatches(request.headers.authorization, config.NUMIA_SERVER_TOKEN);
+      const query = (request.query || {}) as Record<string, string | undefined>;
+      const queryToken = query.token || query.apiKey || query.access_token || query.key;
+      const effectiveAuth = request.headers.authorization || (queryToken ? `Bearer ${queryToken}` : undefined);
+      if (effectiveAuth && !request.headers.authorization) {
+        request.headers.authorization = effectiveAuth;
+        request.raw.headers.authorization = effectiveAuth;
+      }
+      const token = bearerToken(effectiveAuth);
+      const staticAccess = tokenMatches(effectiveAuth, config.NUMIA_SERVER_TOKEN);
       const oauthAccess = token && mcpAuth?.validateAccessToken(token, mcpResource);
       if (!staticAccess && !oauthAccess) {
         reply.header('WWW-Authenticate', `Bearer resource_metadata="${mcpPublicUrls(config).protectedMetadata}", scope="mcp:tools"`);
