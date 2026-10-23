@@ -26,8 +26,13 @@ function redirectAllowed(value: string): boolean {
   } catch { return false; }
 }
 
-export function mcpPublicUrls(config: Config) {
-  const base = (config.PUBLIC_BASE_URL || (config.DOMAIN ? `https://${config.DOMAIN}` : '')).replace(/\/$/, '');
+export function mcpPublicUrls(config: Config, hostHeader?: string) {
+  let base = (config.PUBLIC_BASE_URL || (config.DOMAIN ? `https://${config.DOMAIN}` : '')).replace(/\/$/, '');
+  const cleanHost = (hostHeader || '').split(',')[0]?.trim().toLowerCase() ?? '';
+  const hostnameOnly = cleanHost.split(':')[0] ?? '';
+  if (hostnameOnly && (hostnameOnly.endsWith('.nip.io') || hostnameOnly.endsWith('.sslip.io'))) {
+    base = `https://${cleanHost}`;
+  }
   if (!base) throw new Error('PUBLIC_BASE_URL ou DOMAIN precisa ser configurado para o MCP.');
   return {
     base,
@@ -37,34 +42,38 @@ export function mcpPublicUrls(config: Config) {
   };
 }
 
+function getRequestHost(request: { headers: Record<string, unknown> }): string {
+  return String(request.headers['x-forwarded-host'] || request.headers.host || '');
+}
+
 export async function registerMcpOAuthRoutes(app: FastifyInstance, config: Config, store: McpAuthStore): Promise<void> {
-  const urls = mcpPublicUrls(config);
-  const metadata = {
+  const defaultUrls = mcpPublicUrls(config);
+  const buildMetadata = (urls: ReturnType<typeof mcpPublicUrls>) => ({
     issuer: urls.issuer,
     authorization_endpoint: `${urls.base}/oauth/authorize`,
     token_endpoint: `${urls.base}/oauth/token`,
     registration_endpoint: `${urls.base}/oauth/register`,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
-    code_challenge_methods_supported: ['S256', 'plain'],
+    code_challenge_methods_supported: ['S256'],
     token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
-    scopes_supported: ['mcp:tools', 'offline_access'],
+    scopes_supported: ['mcp:tools'],
     authorization_response_iss_parameter_supported: true,
     client_id_metadata_document_supported: false
-  };
-  const protectedResource = {
+  });
+  const buildProtectedResource = (urls: ReturnType<typeof mcpPublicUrls>) => ({
     resource: urls.resource,
     authorization_servers: [urls.issuer],
     bearer_methods_supported: ['header'],
-    scopes_supported: ['mcp:tools', 'offline_access']
-  };
+    scopes_supported: ['mcp:tools']
+  });
 
-  app.get('/.well-known/oauth-authorization-server', async () => metadata);
-  app.get('/.well-known/oauth-authorization-server/mcp', async () => metadata);
-  app.get('/.well-known/openid-configuration', async () => metadata);
-  app.get('/.well-known/openid-configuration/mcp', async () => metadata);
-  app.get('/.well-known/oauth-protected-resource', async () => protectedResource);
-  app.get('/.well-known/oauth-protected-resource/mcp', async () => protectedResource);
+  app.get('/.well-known/oauth-authorization-server', async (request) => buildMetadata(mcpPublicUrls(config, getRequestHost(request))));
+  app.get('/.well-known/oauth-authorization-server/mcp', async (request) => buildMetadata(mcpPublicUrls(config, getRequestHost(request))));
+  app.get('/.well-known/openid-configuration', async (request) => buildMetadata(mcpPublicUrls(config, getRequestHost(request))));
+  app.get('/.well-known/openid-configuration/mcp', async (request) => buildMetadata(mcpPublicUrls(config, getRequestHost(request))));
+  app.get('/.well-known/oauth-protected-resource', async (request) => buildProtectedResource(mcpPublicUrls(config, getRequestHost(request))));
+  app.get('/.well-known/oauth-protected-resource/mcp', async (request) => buildProtectedResource(mcpPublicUrls(config, getRequestHost(request))));
 
   app.post('/oauth/register', async (request, reply) => {
     const input = z.object({
@@ -90,9 +99,12 @@ export async function registerMcpOAuthRoutes(app: FastifyInstance, config: Confi
     });
   });
 
-  const normalizeResource = (value: string | undefined): string => {
+  const normalizeResource = (value: string | undefined, urls: ReturnType<typeof mcpPublicUrls>): string => {
     const trimmed = (value || '').trim().replace(/\/$/, '');
-    if (!trimmed || trimmed === urls.base || trimmed === urls.resource) {
+    if (!trimmed || trimmed === urls.base || trimmed === urls.resource || trimmed === defaultUrls.base || trimmed === defaultUrls.resource) {
+      return urls.resource;
+    }
+    if (trimmed.endsWith('.nip.io/mcp') || trimmed.endsWith('.sslip.io/mcp') || trimmed.endsWith('.nip.io') || trimmed.endsWith('.sslip.io')) {
       return urls.resource;
     }
     return value!;
@@ -105,15 +117,15 @@ export async function registerMcpOAuthRoutes(app: FastifyInstance, config: Confi
     state: z.string().default(''),
     code_challenge: z.string().max(128).default(''),
     code_challenge_method: z.enum(['S256', 'plain']).default('S256'),
-    resource: z.string().default(urls.resource),
+    resource: z.string().default(''),
     scope: z.string().default('mcp:tools')
   });
 
-  const validateAuthorization = (raw: unknown) => {
+  const validateAuthorization = (raw: unknown, urls: ReturnType<typeof mcpPublicUrls>) => {
     const parsed = authorizationSchema.parse(raw);
     const input = {
       ...parsed,
-      resource: normalizeResource(parsed.resource),
+      resource: normalizeResource(parsed.resource, urls),
       scope: parsed.scope.trim() || 'mcp:tools'
     };
     const client = store.getClient(input.client_id);
@@ -143,7 +155,8 @@ export async function registerMcpOAuthRoutes(app: FastifyInstance, config: Confi
   // redirect flow. The access key, registered redirect URI and PKCE still
   // protect authorization.
   app.get('/oauth/authorize', { config: { cors: { origin: false } } }, async (request, reply) => {
-    const { input, client } = validateAuthorization(request.query);
+    const urls = mcpPublicUrls(config, getRequestHost(request));
+    const { input, client } = validateAuthorization(request.query, urls);
     const hidden = Object.entries(input).map(([key, value]) =>
       `<input type="hidden" name="${escapeHtml(key)}" value="${escapeHtml(String(value))}">`).join('');
     reply.header('Cache-Control', 'no-store');
@@ -154,8 +167,9 @@ export async function registerMcpOAuthRoutes(app: FastifyInstance, config: Confi
   });
 
   app.post('/oauth/authorize', { config: { cors: { origin: false } } }, async (request, reply) => {
+    const urls = mcpPublicUrls(config, getRequestHost(request));
     const raw = z.record(z.string(), z.unknown()).parse(request.body);
-    const { input } = validateAuthorization(raw);
+    const { input } = validateAuthorization(raw, urls);
     const accessKey = typeof raw.access_key === 'string' ? raw.access_key : '';
     if (!constantTokenMatch(accessKey, config.NUMIA_SERVER_TOKEN)) {
       return reply.code(401).type('text/html; charset=utf-8').send('<h1>Acesso negado</h1><p>Código de acesso incorreto.</p>');
@@ -175,6 +189,7 @@ export async function registerMcpOAuthRoutes(app: FastifyInstance, config: Confi
   });
 
   app.post('/oauth/token', async (request, reply) => {
+    const urls = mcpPublicUrls(config, getRequestHost(request));
     const raw = z.record(z.string(), z.unknown()).parse(request.body ?? {});
     const grantType = typeof raw.grant_type === 'string' ? raw.grant_type : '';
     let basicClientId = '';
@@ -189,7 +204,7 @@ export async function registerMcpOAuthRoutes(app: FastifyInstance, config: Confi
       }
     }
     const clientId = (typeof raw.client_id === 'string' && raw.client_id) ? raw.client_id : basicClientId;
-    const resource = normalizeResource(typeof raw.resource === 'string' ? raw.resource : undefined);
+    const resource = normalizeResource(typeof raw.resource === 'string' ? raw.resource : undefined, urls);
     try {
       let result;
       if (grantType === 'authorization_code') {

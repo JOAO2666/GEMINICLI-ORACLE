@@ -474,11 +474,15 @@ export async function buildApp(
         request.headers.authorization = effectiveAuth;
         request.raw.headers.authorization = effectiveAuth;
       }
+      const requestUrls = mcpPublicUrls(config, String(request.headers['x-forwarded-host'] || request.headers.host || ''));
       const token = bearerToken(effectiveAuth);
       const staticAccess = tokenMatches(effectiveAuth, config.NUMIA_SERVER_TOKEN);
-      const oauthAccess = token && mcpAuth?.validateAccessToken(token, mcpResource);
+      const oauthAccess = token && mcpAuth?.validateAccessToken(token, requestUrls.resource);
       if (!staticAccess && !oauthAccess) {
-        reply.header('WWW-Authenticate', `Bearer resource_metadata="${mcpPublicUrls(config).protectedMetadata}", scope="mcp:tools"`);
+        reply.header('WWW-Authenticate', `Bearer resource_metadata="${requestUrls.protectedMetadata}", scope="mcp:tools"`);
+        if (request.method === 'HEAD') {
+          return reply.code(401).header('content-length', '0').send();
+        }
         throw new AppError(401, 'UNAUTHORIZED', 'Autorize a conexão MCP.');
       }
     }
@@ -487,6 +491,9 @@ export async function buildApp(
   app.setErrorHandler((error, request, reply) => {
     const safe = publicError(error);
     if (safe.statusCode >= 500) request.log.error({ err: error, code: safe.code }, 'request failed');
+    if (request.method === 'HEAD') {
+      return reply.code(safe.statusCode).header('content-length', '0').send();
+    }
     reply.code(safe.statusCode).send({ error: safe.code, message: safe.message });
   });
 
@@ -558,7 +565,7 @@ export async function buildApp(
     const workspaces = mcpWorkspaces;
     const mcpHandler = async (request: any, reply: any) => {
       if (request.method === 'HEAD' || request.method === 'OPTIONS') {
-        return reply.code(200).header('content-type', 'application/json').send();
+        return reply.code(200).header('content-type', 'application/json').header('content-length', '0').send();
       }
       if (request.raw.url && request.raw.url.startsWith('/mcp/')) {
         const queryIdx = request.raw.url.indexOf('?');

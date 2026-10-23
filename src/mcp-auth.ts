@@ -20,6 +20,13 @@ interface AuthorizationCodeInput {
 const digest = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const randomToken = (prefix: string) => `${prefix}${crypto.randomBytes(32).toString('base64url')}`;
 
+function resourcesMatch(stored: unknown, requested: string): boolean {
+  const left = String(stored || '').trim().replace(/\/$/, '');
+  const right = String(requested || '').trim().replace(/\/$/, '');
+  if (!right || left === right) return true;
+  return left.endsWith('/mcp') && right.endsWith('/mcp');
+}
+
 export class McpAuthStore {
   private readonly db: Database.Database;
 
@@ -101,7 +108,7 @@ export class McpAuthStore {
       if (!row || row.used_at || Number(row.expires_at) < Date.now()) throw new AppError(400, 'invalid_grant', 'Código inválido ou expirado.');
       const effectiveClientId = clientId || String(row.client_id);
       const effectiveRedirectUri = redirectUri || String(row.redirect_uri);
-      if (row.client_id !== effectiveClientId || row.redirect_uri !== effectiveRedirectUri || row.resource !== resource) {
+      if (row.client_id !== effectiveClientId || row.redirect_uri !== effectiveRedirectUri || !resourcesMatch(row.resource, resource)) {
         throw new AppError(400, 'invalid_grant', 'Código não pertence a esta solicitação.');
       }
       const storedChallenge = String(row.code_challenge || '');
@@ -122,9 +129,9 @@ export class McpAuthStore {
       const row = this.db.prepare('SELECT * FROM oauth_tokens WHERE refresh_hash=?').get(digest(refreshToken)) as Record<string, unknown> | undefined;
       if (!row || row.revoked_at || Number(row.refresh_expires_at) < Date.now()) throw new AppError(400, 'invalid_grant', 'Refresh token inválido ou expirado.');
       const effectiveClientId = clientId || String(row.client_id);
-      if (row.client_id !== effectiveClientId || row.resource !== resource) throw new AppError(400, 'invalid_grant', 'Refresh token incompatível.');
+      if (row.client_id !== effectiveClientId || !resourcesMatch(row.resource, resource)) throw new AppError(400, 'invalid_grant', 'Refresh token incompatível.');
       this.db.prepare('UPDATE oauth_tokens SET revoked_at=? WHERE id=?').run(Date.now(), row.id);
-      return this.issueTokens(effectiveClientId, resource, String(row.scope));
+      return this.issueTokens(effectiveClientId, String(row.resource), String(row.scope));
     });
     return transaction();
   }
@@ -145,7 +152,7 @@ export class McpAuthStore {
   validateAccessToken(token: string, resource: string): { clientId: string; scope: string } | null {
     const row = this.db.prepare(`SELECT client_id,scope,resource,access_expires_at,revoked_at
       FROM oauth_tokens WHERE access_hash=?`).get(digest(token)) as Record<string, unknown> | undefined;
-    if (!row || row.revoked_at || Number(row.access_expires_at) < Date.now() || row.resource !== resource) return null;
+    if (!row || row.revoked_at || Number(row.access_expires_at) < Date.now() || !resourcesMatch(row.resource, resource)) return null;
     return { clientId: String(row.client_id), scope: String(row.scope) };
   }
 }
