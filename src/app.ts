@@ -462,6 +462,9 @@ export async function buildApp(
       throw new AppError(401, 'UNAUTHORIZED', 'Token de acesso inválido.');
     }
     if (pathname === '/mcp') {
+      if (request.method === 'HEAD' || request.method === 'OPTIONS') {
+        return;
+      }
       const query = (request.query || {}) as Record<string, string | undefined>;
       const queryToken = query.token || query.apiKey || query.access_token || query.key;
       const effectiveAuth = request.headers.authorization || (queryToken ? `Bearer ${queryToken}` : undefined);
@@ -552,9 +555,12 @@ export async function buildApp(
     const endpoint = mcpEndpoint;
     const workspaces = mcpWorkspaces;
     app.route({
-      method: ['GET', 'POST', 'DELETE'],
+      method: ['GET', 'POST', 'DELETE', 'HEAD', 'OPTIONS'],
       url: '/mcp',
       handler: async (request, reply) => {
+        if (request.method === 'HEAD' || request.method === 'OPTIONS') {
+          return reply.code(200).header('content-type', 'application/json').send();
+        }
         reply.hijack();
         await endpoint.nodeHandler(request.raw, reply.raw, request.body);
       }
