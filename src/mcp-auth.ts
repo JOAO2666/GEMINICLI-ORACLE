@@ -99,13 +99,20 @@ export class McpAuthStore {
     const transaction = this.db.transaction(() => {
       const row = this.db.prepare('SELECT * FROM oauth_codes WHERE code_hash=?').get(digest(code)) as Record<string, unknown> | undefined;
       if (!row || row.used_at || Number(row.expires_at) < Date.now()) throw new AppError(400, 'invalid_grant', 'Código inválido ou expirado.');
-      if (row.client_id !== clientId || row.redirect_uri !== redirectUri || row.resource !== resource) {
+      const effectiveClientId = clientId || String(row.client_id);
+      const effectiveRedirectUri = redirectUri || String(row.redirect_uri);
+      if (row.client_id !== effectiveClientId || row.redirect_uri !== effectiveRedirectUri || row.resource !== resource) {
         throw new AppError(400, 'invalid_grant', 'Código não pertence a esta solicitação.');
       }
-      const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
-      if (challenge !== row.code_challenge) throw new AppError(400, 'invalid_grant', 'Verificador PKCE inválido.');
+      const storedChallenge = String(row.code_challenge || '');
+      if (storedChallenge) {
+        const s256Challenge = crypto.createHash('sha256').update(verifier).digest('base64url');
+        if (s256Challenge !== storedChallenge && verifier !== storedChallenge) {
+          throw new AppError(400, 'invalid_grant', 'Verificador PKCE inválido.');
+        }
+      }
       this.db.prepare('UPDATE oauth_codes SET used_at=? WHERE code_hash=?').run(Date.now(), digest(code));
-      return this.issueTokens(clientId, String(row.resource), String(row.scope));
+      return this.issueTokens(effectiveClientId, String(row.resource), String(row.scope));
     });
     return transaction();
   }
@@ -114,9 +121,10 @@ export class McpAuthStore {
     const transaction = this.db.transaction(() => {
       const row = this.db.prepare('SELECT * FROM oauth_tokens WHERE refresh_hash=?').get(digest(refreshToken)) as Record<string, unknown> | undefined;
       if (!row || row.revoked_at || Number(row.refresh_expires_at) < Date.now()) throw new AppError(400, 'invalid_grant', 'Refresh token inválido ou expirado.');
-      if (row.client_id !== clientId || row.resource !== resource) throw new AppError(400, 'invalid_grant', 'Refresh token incompatível.');
+      const effectiveClientId = clientId || String(row.client_id);
+      if (row.client_id !== effectiveClientId || row.resource !== resource) throw new AppError(400, 'invalid_grant', 'Refresh token incompatível.');
       this.db.prepare('UPDATE oauth_tokens SET revoked_at=? WHERE id=?').run(Date.now(), row.id);
-      return this.issueTokens(clientId, resource, String(row.scope));
+      return this.issueTokens(effectiveClientId, resource, String(row.scope));
     });
     return transaction();
   }

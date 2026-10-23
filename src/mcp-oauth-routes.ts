@@ -46,9 +46,9 @@ export async function registerMcpOAuthRoutes(app: FastifyInstance, config: Confi
     registration_endpoint: `${urls.base}/oauth/register`,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
-    code_challenge_methods_supported: ['S256'],
+    code_challenge_methods_supported: ['S256', 'plain'],
     token_endpoint_auth_methods_supported: ['none', 'client_secret_post', 'client_secret_basic'],
-    scopes_supported: ['mcp:tools'],
+    scopes_supported: ['mcp:tools', 'offline_access'],
     authorization_response_iss_parameter_supported: true,
     client_id_metadata_document_supported: false
   };
@@ -56,10 +56,13 @@ export async function registerMcpOAuthRoutes(app: FastifyInstance, config: Confi
     resource: urls.resource,
     authorization_servers: [urls.issuer],
     bearer_methods_supported: ['header'],
-    scopes_supported: ['mcp:tools']
+    scopes_supported: ['mcp:tools', 'offline_access']
   };
 
   app.get('/.well-known/oauth-authorization-server', async () => metadata);
+  app.get('/.well-known/oauth-authorization-server/mcp', async () => metadata);
+  app.get('/.well-known/openid-configuration', async () => metadata);
+  app.get('/.well-known/openid-configuration/mcp', async () => metadata);
   app.get('/.well-known/oauth-protected-resource', async () => protectedResource);
   app.get('/.well-known/oauth-protected-resource/mcp', async () => protectedResource);
 
@@ -83,28 +86,55 @@ export async function registerMcpOAuthRoutes(app: FastifyInstance, config: Confi
       redirect_uris: client.redirectUris,
       grant_types: ['authorization_code', 'refresh_token'],
       response_types: ['code'],
-      token_endpoint_auth_method: 'none'
+      token_endpoint_auth_method: input.token_endpoint_auth_method || 'none'
     });
   });
 
+  const normalizeResource = (value: string | undefined): string => {
+    const trimmed = (value || '').trim().replace(/\/$/, '');
+    if (!trimmed || trimmed === urls.base || trimmed === urls.resource) {
+      return urls.resource;
+    }
+    return value!;
+  };
+
   const authorizationSchema = z.object({
-    response_type: z.literal('code'),
+    response_type: z.literal('code').default('code'),
     client_id: z.string().min(1),
     redirect_uri: z.string().min(1),
     state: z.string().default(''),
-    code_challenge: z.string().min(43).max(128),
-    code_challenge_method: z.literal('S256'),
+    code_challenge: z.string().max(128).default(''),
+    code_challenge_method: z.enum(['S256', 'plain']).default('S256'),
     resource: z.string().default(urls.resource),
     scope: z.string().default('mcp:tools')
   });
 
   const validateAuthorization = (raw: unknown) => {
-    const input = authorizationSchema.parse(raw);
+    const parsed = authorizationSchema.parse(raw);
+    const input = {
+      ...parsed,
+      resource: normalizeResource(parsed.resource),
+      scope: parsed.scope.trim() || 'mcp:tools'
+    };
     const client = store.getClient(input.client_id);
-    const redirectAllowedMatch = client && (client.redirectUris.includes('*') || client.redirectUris.includes(input.redirect_uri) || redirectAllowed(input.redirect_uri));
+    const isWildcardClient = Boolean(client?.redirectUris.includes('*'));
+    const redirectAllowedMatch = client && (
+      (isWildcardClient && redirectAllowed(input.redirect_uri)) ||
+      client.redirectUris.includes(input.redirect_uri)
+    );
     if (!client || !redirectAllowedMatch) throw new AppError(400, 'invalid_request', 'Cliente ou retorno inválido.');
+    if (!isWildcardClient && input.code_challenge.length < 43) {
+      throw new AppError(400, 'invalid_request', 'PKCE code_challenge obrigatório.');
+    }
     if (input.resource !== urls.resource) throw new AppError(400, 'invalid_target', 'Resource inválido.');
-    if (!input.scope.split(/\s+/).includes('mcp:tools')) throw new AppError(400, 'invalid_scope', 'Escopo mcp:tools obrigatório.');
+    const requestedScopes = input.scope.split(/\s+/).filter(Boolean);
+    const allowedScopes = new Set(['mcp:tools', 'offline_access', 'openid', 'profile', 'email']);
+    if (requestedScopes.some((s) => !allowedScopes.has(s))) {
+      throw new AppError(400, 'invalid_scope', 'Escopo mcp:tools obrigatório.');
+    }
+    if (!requestedScopes.includes('mcp:tools')) {
+      input.scope = ['mcp:tools', ...requestedScopes].join(' ');
+    }
     return { input, client };
   };
 
@@ -145,10 +175,21 @@ export async function registerMcpOAuthRoutes(app: FastifyInstance, config: Confi
   });
 
   app.post('/oauth/token', async (request, reply) => {
-    const raw = z.record(z.string(), z.unknown()).parse(request.body);
+    const raw = z.record(z.string(), z.unknown()).parse(request.body ?? {});
     const grantType = typeof raw.grant_type === 'string' ? raw.grant_type : '';
-    const clientId = typeof raw.client_id === 'string' ? raw.client_id : '';
-    const resource = typeof raw.resource === 'string' ? raw.resource : urls.resource;
+    let basicClientId = '';
+    const authHeader = request.headers.authorization;
+    if (authHeader?.startsWith('Basic ')) {
+      try {
+        const decoded = Buffer.from(authHeader.slice(6), 'base64').toString('utf8');
+        const colonIdx = decoded.indexOf(':');
+        basicClientId = decodeURIComponent(colonIdx >= 0 ? decoded.slice(0, colonIdx) : decoded);
+      } catch {
+        // ignore invalid basic header
+      }
+    }
+    const clientId = (typeof raw.client_id === 'string' && raw.client_id) ? raw.client_id : basicClientId;
+    const resource = normalizeResource(typeof raw.resource === 'string' ? raw.resource : undefined);
     try {
       let result;
       if (grantType === 'authorization_code') {
