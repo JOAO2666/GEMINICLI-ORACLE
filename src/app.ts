@@ -463,7 +463,7 @@ export async function buildApp(
     }
     const isMcpRoute = pathname === '/mcp' || pathname.startsWith('/mcp/');
     if (isMcpRoute) {
-      if (request.method === 'HEAD' || request.method === 'OPTIONS') {
+      if (request.method === 'OPTIONS') {
         return;
       }
       const pathToken = pathname.startsWith('/mcp/') ? pathname.slice('/mcp/'.length).split('/')[0] : undefined;
