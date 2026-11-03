@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Auto-Update check for Antigravity IDE
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target

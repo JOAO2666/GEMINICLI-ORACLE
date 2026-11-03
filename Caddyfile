@@ -1,5 +1,11 @@
-{$DOMAIN} {
+129-148-23-167.nip.io, mcp.129-148-23-167.nip.io, 129-148-23-167.sslip.io, mcp.129-148-23-167.sslip.io {
   reverse_proxy server:3000 {
+    flush_interval -1
+  }
+}
+
+obsidian.129-148-23-167.nip.io {
+  reverse_proxy obsidian:3000 {
     flush_interval -1
   }
 }
